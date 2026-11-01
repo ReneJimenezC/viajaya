@@ -1,0 +1,17 @@
+# Lo que NO se envía a Docker al construir la imagen
+
+# Las dependencias se instalan dentro del contenedor con npm ci
+node_modules/
+# El build se hace dentro del contenedor
+dist/
+coverage/
+# Los secretos nunca entran a la imagen
+.env
+.env.*
+# Archivos de pruebas manuales de REST Client
+http/
+# Archivos que no hacen falta para ejecutar la API
+Dockerfile
+.dockerignore
+*.log
+*.md

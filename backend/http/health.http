@@ -1,0 +1,12 @@
+# Pruebas manuales con la extensión REST Client de VS Code.
+# Clic en "Send Request" encima de cada petición.
+
+# Variable con la URL base de la API local
+@baseUrl = http://localhost:3000
+
+### Salud del servicio: debe responder 200 con {"status":"ok"}
+GET {{baseUrl}}/health
+
+### Ruta inexistente: por ahora responde 404 con el HTML por defecto de Express.
+### El manejo centralizado de errores (JSON estándar) llega en un módulo posterior.
+GET {{baseUrl}}/no-existe

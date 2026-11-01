@@ -1,0 +1,39 @@
+{
+  // Configuración de TypeScript para el editor, la verificación de tipos y las pruebas
+  "compilerOptions": {
+    // Versión de JavaScript que se genera (Node 24 la soporta completa)
+    "target": "ES2023",
+    // Sistema de módulos de Node; con "type": "commonjs" genera require()
+    "module": "nodenext",
+    // Busca los imports igual que lo hace Node
+    "moduleResolution": "nodenext",
+    // Librerías estándar disponibles
+    "lib": ["ES2023"],
+    // El código fuente está en src/...
+    "rootDir": "src",
+    // ...y el JavaScript compilado sale en dist/
+    "outDir": "dist",
+    // Mapas para que los errores apunten a la línea del .ts y no del .js
+    "sourceMap": true,
+    // Activa todas las comprobaciones estrictas (null, any implícito, etc.)
+    "strict": true,
+    // Leer arreglo[i] puede ser undefined: obliga a comprobarlo
+    "noUncheckedIndexedAccess": true,
+    // Error si una función tiene caminos que no retornan
+    "noImplicitReturns": true,
+    // Error en los "case" de un switch que caen al siguiente sin break
+    "noFallthroughCasesInSwitch": true,
+    // Permite "import express from 'express'" con librerías CommonJS
+    "esModuleInterop": true,
+    // Cada archivo se compila de forma independiente (lo requieren tsx y Jest)
+    "isolatedModules": true,
+    // Error si un import no respeta mayúsculas (Windows no las distingue, Linux sí)
+    "forceConsistentCasingInFileNames": true,
+    // No revisa los tipos internos de las librerías (más rápido)
+    "skipLibCheck": true, 
+
+    "types": ["node"]
+  },
+  // Archivos que se incluyen
+  "include": ["src/**/*.ts"]
+}

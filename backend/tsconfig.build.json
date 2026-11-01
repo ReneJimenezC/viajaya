@@ -1,0 +1,6 @@
+{
+  // Configuración solo para compilar a producción: hereda todo de tsconfig.json...
+  "extends": "./tsconfig.json",
+  // ...pero deja fuera las pruebas para que no lleguen a dist/
+  "exclude": ["src/tests/**", "src/**/*.test.ts"]
+}

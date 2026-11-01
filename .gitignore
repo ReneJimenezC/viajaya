@@ -1,0 +1,28 @@
+# Dependencias instaladas por npm (se regeneran con "npm ci", nunca se suben)
+node_modules/
+
+# Código JavaScript compilado desde TypeScript (se genera con "npm run build")
+dist/
+
+# Reporte de cobertura que genera Jest
+coverage/
+
+# Secretos: se ignora cualquier archivo .env o .env.algo...
+.env
+.env.*
+# ...excepto la plantilla sin secretos, que sí se sube
+!.env.example
+
+# Archivos de log
+*.log
+npm-debug.log*
+
+# Basura que crean los sistemas operativos
+.DS_Store
+Thumbs.db
+
+# Configuración personal de los editores
+.idea/
+.vscode/*
+# Se comparte solo la lista de extensiones recomendadas (REST Client)
+!.vscode/extensions.json

@@ -1,0 +1,66 @@
+# Entorno de desarrollo: base de datos Postgres + API en contenedores.
+# Lee las variables del archivo .env de esta misma carpeta.
+
+services:
+  # ---------- Base de datos de desarrollo ----------
+  db:
+    # Postgres 17 en Alpine (imagen liviana); misma versión mayor que Supabase
+    image: postgres:17-alpine
+    # Se reinicia solo si se cae, salvo que lo detengamos a mano
+    restart: unless-stopped
+    environment:
+      # ":?" hace que compose falle con un mensaje claro si falta la variable
+      POSTGRES_USER: ${POSTGRES_USER:?Falta POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Falta POSTGRES_DB en .env}
+    ports:
+      # Publica el puerto solo en 127.0.0.1: nadie más en tu red puede conectarse
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # Los datos sobreviven aunque se borre el contenedor
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      # Comando que dice si Postgres ya acepta conexiones
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # Cada cuánto se revisa, cuánto espera cada intento y cuántos fallos tolera
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------- API (backend) ----------
+  api:
+    build:
+      # Carpeta donde está el Dockerfile
+      context: ./backend
+      # Construye la etapa final (imagen de producción)
+      target: production
+    restart: unless-stopped
+    environment:
+      # Solo se pasan las variables que la API necesita, no todo el .env
+      NODE_ENV: ${NODE_ENV:?Falta NODE_ENV en .env}
+      PORT: ${PORT:?Falta PORT en .env}
+      # Dentro de la red de Docker el host de la base es "db", no localhost
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    ports:
+      # La API también se publica solo en tu máquina
+      - "127.0.0.1:${PORT}:${PORT}"
+    depends_on:
+      db:
+        # La API no arranca hasta que el healthcheck de la base esté en verde
+        condition: service_healthy
+    # Endurecimiento del contenedor:
+    # el sistema de archivos es de solo lectura (nadie puede alterar el código)
+    read_only: true
+    # carpeta temporal en memoria, por si Node necesita escribir algo
+    tmpfs:
+      - /tmp
+    # el proceso no puede ganar más privilegios de los que tiene
+    security_opt:
+      - no-new-privileges:true
+    # se quitan todas las capacidades especiales de Linux (no las necesita)
+    cap_drop:
+      - ALL
+
+# Volumen con nombre donde Docker guarda los datos de Postgres
+volumes:
+  db_data:
