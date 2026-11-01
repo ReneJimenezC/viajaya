@@ -26,3 +26,4 @@ Thumbs.db
 .vscode/*
 # Se comparte solo la lista de extensiones recomendadas (REST Client)
 !.vscode/extensions.json
+!.vscode/settings.json
