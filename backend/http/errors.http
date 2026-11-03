@@ -1,0 +1,14 @@
+# Pruebas manuales del manejo de errores (3.F). Requiere la API corriendo en el puerto 3000.
+# En VS Code, clic en "Send Request" encima de cada bloque.
+
+### 200: /health responde bien (y NO debe aparecer en el log)
+GET http://127.0.0.1:3000/health
+
+### 404: ruta que no existe → NOT_FOUND
+GET http://127.0.0.1:3000/no-existe
+
+### 400: JSON mal escrito → VALIDATION_ERROR
+POST http://127.0.0.1:3000/health
+Content-Type: application/json
+
+{malo
