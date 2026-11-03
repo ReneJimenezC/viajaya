@@ -3,6 +3,7 @@
 
 import { DataSource } from 'typeorm';
 import { env } from './env';
+import { InitialSchema } from '../migrations/001-initial-schema';
 
 export const AppDataSource = new DataSource({
   // Motor de base de datos; TypeORM usa por debajo el driver "pg"
@@ -11,6 +12,8 @@ export const AppDataSource = new DataSource({
   url: env.databaseUrl,
   // Clases @Entity que TypeORM conoce; se agregan una por una en los módulos siguientes
   entities: [],
+    // Migraciones (scripts versionados que crean y cambian tablas); se agregan una por una
+   migrations: [InitialSchema],
   // NUNCA crear ni alterar tablas a partir de las entidades: solo con migraciones (SAD 4)
   synchronize: false,
   // En desarrollo muestra los errores de SQL; en producción no, porque el mensaje
