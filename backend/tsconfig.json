@@ -32,7 +32,11 @@
     // No revisa los tipos internos de las librerías (más rápido)
     "skipLibCheck": true, 
 
-    "types": ["node"]
+    "types": ["node"],
+// Activa los decoradores que usa TypeORM (@Entity, @Column), como las anotaciones de JPA.
+    // No se activa emitDecoratorMetadata: tsx (npm run dev) no lo soporta, así que
+    // cada @Column declara su tipo explícito y todo se comporta igual en dev y en producción.
+    "experimentalDecorators": true,
   },
   // Archivos que se incluyen
   "include": ["src/**/*.ts"]

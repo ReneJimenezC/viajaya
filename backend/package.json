@@ -12,10 +12,17 @@
     "dev": "tsx watch --env-file=../.env src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --enable-source-maps dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migration:run": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:run -d src/config/data-source.ts",
+    "migration:revert": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:revert -d src/config/data-source.ts",
+     "migration:show": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:show -d src/config/data-source.ts",
+      "seed:dev": "tsx --env-file=../.env src/seeds/dev-seed.ts"
   },
   "dependencies": {
-    "express": "5.3.0"
+    "express": "5.3.0",
+    "pg": "8.23.1",
+    "reflect-metadata": "0.2.2",
+    "typeorm": "1.1.2"
   },
   "devDependencies": {
     "@types/express": "5.0.6",
