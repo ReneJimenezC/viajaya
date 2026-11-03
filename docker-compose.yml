@@ -41,6 +41,8 @@ services:
       PORT: ${PORT:?Falta PORT en .env}
       # Dentro de la red de Docker el host de la base es "db", no localhost
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # NUEVO (Paso 3): secreto para firmar los access tokens del admin
+      JWT_SECRET: ${JWT_SECRET:?Falta JWT_SECRET en .env}
     ports:
       # La API también se publica solo en tu máquina
       - "127.0.0.1:${PORT}:${PORT}"
