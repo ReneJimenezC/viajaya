@@ -6,6 +6,7 @@ import 'reflect-metadata';
 import type { Server } from 'node:http';
 // Importar env primero valida las variables antes de hacer cualquier otra cosa
 import { env } from './config/env';
+import { logger } from './config/logger';
 import { AppDataSource } from './config/data-source';
 import { createApp } from './app';
 
@@ -18,18 +19,18 @@ let shuttingDown = false;
 async function start(): Promise<void> {
   // Abre el pool de conexiones a Postgres; si falla, lanza un error y no se abre el puerto
   await AppDataSource.initialize();
-  console.log('Conectado a la base de datos');
+  logger.info('Conectado a la base de datos');
 
   const app = createApp();
   // Abre el puerto. En Express 5, si falla (ej. puerto ocupado) llega "error".
   server = app.listen(env.port, (error?: Error) => {
     if (error) {
       // Sin puerto no hay servicio: se informa y se termina con código de error
-      console.error('No se pudo iniciar el servidor:', error.message);
+         logger.fatal({ reason: error.message }, 'No se pudo iniciar el servidor');
       process.exit(1);
     }
-    // Mensaje temporal; el logging estructurado llega en un módulo posterior
-    console.log(`API escuchando en el puerto ${env.port} (${env.nodeEnv})`);
+   
+           logger.info({ port: env.port, nodeEnv: env.nodeEnv }, 'API escuchando');
   });
 }
 
@@ -37,7 +38,7 @@ async function start(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`${signal} recibido, cerrando...`);
+     logger.info({ signal }, 'Señal recibida, cerrando...');
   // Si en 10 s no terminó, se fuerza la salida; unref() no bloquea el cierre normal
   setTimeout(() => process.exit(1), 10_000).unref();
 
@@ -51,11 +52,11 @@ async function shutdown(signal: string): Promise<void> {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy();
     }
-    console.log('Servidor y base de datos cerrados');
+       logger.info('Servidor y base de datos cerrados');
     process.exit(0);
   } catch (error) {
-    console.error('Error al cerrar:', error instanceof Error ? error.message : error);
-    process.exit(1);
+          logger.error({ reason: error instanceof Error ? error.message : String(error) }, 'Error al cerrar');
+              process.exit(1);
   }
 }
 
@@ -66,6 +67,6 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 // Si el arranque falla (base apagada, clave incorrecta...), se informa y se termina.
 // Los mensajes de pg ("ECONNREFUSED", "password authentication failed") no incluyen la clave.
 start().catch((error: unknown) => {
-  console.error('No se pudo iniciar la API:', error instanceof Error ? error.message : error);
+   logger.fatal({ reason: error instanceof Error ? error.message : String(error) }, 'No se pudo iniciar la API');
   process.exit(1);
 });

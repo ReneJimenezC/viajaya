@@ -8,6 +8,10 @@ type NodeEnv = (typeof NODE_ENVS)[number];
  // Protocolos aceptados en DATABASE_URL (Postgres acepta los dos nombres)
  const DATABASE_PROTOCOLS = ['postgres:', 'postgresql:'];
 
+ // NUEVO (Paso 3): largo mínimo del secreto JWT. Con HS256 se recomienda al menos
+// 32 bytes (256 bits); uno más corto se puede adivinar probando combinaciones.
+const JWT_SECRET_MIN_LENGTH = 32;
+
 // Lee una variable obligatoria o lanza un error con su nombre
 function required(name: string): string {
   // Toma el valor y le quita espacios accidentales
@@ -68,6 +72,18 @@ function readPort(): number {
    return raw;
  }
 
+ // NUEVO (Paso 3): valida el secreto con el que la API firma los access tokens (JWT).
+// Como DATABASE_URL, los errores NUNCA muestran el valor.
+function readJwtSecret(): string {
+  const value = required('JWT_SECRET');
+  // .length cuenta caracteres; el secreto generado tiene 64 (solo letras, números, - y _)
+  if (value.length < JWT_SECRET_MIN_LENGTH) {
+    throw new Error(
+      `JWT_SECRET demasiado corto: debe tener al menos ${JWT_SECRET_MIN_LENGTH} caracteres`,
+    );
+  }
+  return value;
+}
 
 
 
@@ -78,4 +94,6 @@ export const env = Object.freeze({
   nodeEnv: readNodeEnv(),
   port: readPort(),
   databaseUrl: readDatabaseUrl(),
+    // NUEVO (Paso 3)
+  jwtSecret: readJwtSecret(),
 });
