@@ -16,6 +16,10 @@ import { createAuthRouter } from './routes/auth.routes';
 import { DestinationService } from './services/destination.service';
 import { AdminDestinationController } from './controllers/admin-destination.controller';
 import { createAdminDestinationRouter } from './routes/admin-destination.routes';
+import { DestinationController } from './controllers/destination.controller';
+import { createDestinationRouter } from './routes/destination.routes';
+
+
 
 
 // Tamaño máximo del body: sobra para un login o una reserva (menos de 1 KB)
@@ -45,13 +49,14 @@ export function createApp(): express.Express {
   // Módulo de destinos (RF-07): servicio → controlador → rutas
   const destinationService = new DestinationService(AppDataSource);
   const adminDestinationController = new AdminDestinationController(destinationService);
-
+  const destinationController = new DestinationController(destinationService);
 
 
 
   // Registra las rutas. Aquí se sumarán las de los módulos client y admin.
   app.use(healthRouter);
   app.use(createAuthRouter(authController));
+    app.use(createDestinationRouter(destinationController));
     app.use(createAdminDestinationRouter(adminDestinationController, authService));
   
   // Ninguna ruta atendió la petición → 404

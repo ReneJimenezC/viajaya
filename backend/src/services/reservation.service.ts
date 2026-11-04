@@ -60,3 +60,12 @@ export function canChangeReservation(travelDate: string, now: Date): boolean {
 export function todayInCostaRica(now: Date): string {
   return new Date(now.getTime() + COSTA_RICA_OFFSET_MS).toISOString().slice(0, 10);
 }
+
+
+// CU-01: true si la fecha del viaje es posterior a hoy (en Costa Rica).
+// Ejemplo con hoy = "2026-11-03": "2026-11-04" → true; "2026-11-03" → false.
+// Las fechas "AAAA-MM-DD" se pueden comparar como texto: el orden alfabético es el cronológico.
+export function isFutureTravelDate(travelDate: string, now: Date): boolean {
+  travelDayStart(travelDate);
+  return travelDate > todayInCostaRica(now);
+}

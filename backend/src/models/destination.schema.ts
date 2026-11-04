@@ -88,3 +88,46 @@ export const updateDestinationSchema = z
 
 export type CreateDestinationInput = z.infer<typeof createDestinationSchema>;
 export type UpdateDestinationInput = z.infer<typeof updateDestinationSchema>;
+// Dice si "AAAA-MM-DD" existe en el calendario. Ejemplo: "2026-02-28" → true;
+// "2026-02-30" → false (JavaScript lo correría al 2 de marzo); "2026-13-01" → false.
+function isCalendarDate(value: string): boolean {
+  const date = new Date(`${value}T00:00:00Z`);
+  // Primero getTime(): con una fecha inválida, toISOString() lanzaría una excepción
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+// Fecha "AAAA-MM-DD" que existe en el calendario
+const travelDateField = z
+  .string({ error: 'La fecha debe tener el formato AAAA-MM-DD' })
+  .regex(/^\d{4}-\d{2}-\d{2}$/, { error: 'La fecha debe tener el formato AAAA-MM-DD' })
+  .refine(isCalendarDate, { error: 'La fecha no existe' });
+
+// Consulta de GET /destinos?lugar&fecha&personas (RF-01, CU-01). Los nombres de los
+// parámetros son los del SAD 3.4. Todos son opcionales, pero fecha y personas van juntas.
+// Ejemplo: { lugar: 'Puntarenas', fecha: '2026-12-10', personas: '4' }
+//   → { place: 'Puntarenas', date: '2026-12-10', people: 4 }
+export const searchDestinationsSchema = z
+  .object({
+    lugar: z
+      .string({ error: 'El lugar debe ser un texto' })
+      .trim()
+      .max(PLACE_MAX_LENGTH, { error: `El lugar no puede tener más de ${PLACE_MAX_LENGTH} caracteres` })
+      .optional(),
+    fecha: travelDateField.optional(),
+    personas: z
+      .string({ error: 'La cantidad de personas debe ser un número entero' })
+      .regex(/^[1-9]\d{0,3}$/, { error: 'La cantidad de personas debe ser un entero entre 1 y 9999' })
+      .transform(Number)
+      .optional(),
+  })
+  .refine((query) => (query.fecha === undefined) === (query.personas === undefined), {
+    error: 'La fecha y la cantidad de personas deben indicarse juntas',
+    path: ['fecha'],
+  })
+  .transform((query) => ({
+    place: query.lugar ? query.lugar : undefined,
+    date: query.fecha,
+    people: query.personas,
+  }));
+
+export type SearchDestinationsInput = z.infer<typeof searchDestinationsSchema>;

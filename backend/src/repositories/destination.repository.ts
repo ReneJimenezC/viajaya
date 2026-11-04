@@ -65,7 +65,40 @@ export class DestinationRepository {
       return translateDuplicateName(error);
     }
   }
+  // Destinos ACTIVOS, opcionalmente filtrados por lugar (contiene el texto, sin distinguir
+  // mayúsculas). Ejemplo: "punta" encuentra "Quepos, Puntarenas". Ordenados por nombre.
+  findActive(place?: string): Promise<Destination[]> {
+    const query = this.manager
+      .createQueryBuilder(Destination, 'd')
+      .where('d.activo = true')
+      .orderBy('d.nombre', 'ASC');
+    if (place) {
+      // % y _ son comodines en ILIKE: se escapan para que se busquen como texto normal
+      const escaped = place.replace(/[\\%_]/g, (char) => `\\${char}`);
+      query.andWhere('d.lugar ILIKE :pattern', { pattern: `%${escaped}%` });
+    }
+    return query.getMany();
+  }
 
+  // Personas ya reservadas en una fecha, por destino. Devuelve un Map id → personas;
+  // los destinos sin reservas ese día no aparecen (cuentan como 0).
+  // Ejemplo: Tortuguero (4) con 18 personas el 10/12 → Map { 4 => 18 }
+  async reservedPeopleOn(date: string, destinationIds: number[]): Promise<Map<number, number>> {
+    if (destinationIds.length === 0) {
+      return new Map();
+    }
+    const rows: { id_destino: number; total: number }[] = await this.manager.query(
+      `SELECT id_destino, SUM(cantidad_personas)::int AS total
+         FROM reservas
+        WHERE fecha_viaje = $1
+          AND id_destino = ANY($2)
+          AND estado = ANY($3)
+          AND eliminado_en IS NULL
+        GROUP BY id_destino`,
+      [date, destinationIds, OCCUPYING_STATES],
+    );
+    return new Map(rows.map((row) => [row.id_destino, row.total]));
+  }
   // Mayor cantidad de personas reservadas en un mismo día, desde "fromDate" en adelante.
   // Sirve para no bajar la capacidad por debajo de lo ya vendido (sección 7).
   // Ejemplo: 10/12 con 18 personas y 11/12 con 7 → 18. Sin reservas → 0.

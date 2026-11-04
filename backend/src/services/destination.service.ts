@@ -4,16 +4,73 @@
 import type { DataSource } from 'typeorm';
 import { AppError } from '../errors/app-error';
 import type { Destination } from '../models/destination.entity';
-import type { CreateDestinationInput, UpdateDestinationInput } from '../models/destination.schema';
+import type {
+  CreateDestinationInput,
+  SearchDestinationsInput,
+  UpdateDestinationInput,
+} from '../models/destination.schema';
 import { DestinationRepository } from '../repositories/destination.repository';
-import { todayInCostaRica } from './reservation.service';
+import { hasCapacity, isFutureTravelDate, todayInCostaRica } from './reservation.service';
 
 // Mensaje para un id que no existe (CU-09 6b y CU-10 2a)
 const NOT_FOUND_MESSAGE = 'El destino no existe';
 
+// Lo que ve el turista de un destino (sin capacidad total ni estado: datos internos).
+// availableSeats y available solo vienen si la búsqueda trae fecha y personas.
+export interface PublicDestination {
+  id: number;
+  name: string;
+  description: string | null;
+  place: string;
+  basePrice: string;
+  availableSeats?: number;
+  available?: boolean;
+}
+
 export class DestinationService {
   constructor(private readonly dataSource: DataSource) {}
 
+
+  // RF-01 / CU-01: destinos activos (filtrados por lugar si se pide). Con fecha y personas,
+  // agrega a cada uno los cupos libres ese día y si alcanza para el grupo (RN-01).
+  // Es solo informativo: al reservar se vuelve a validar con bloqueo (CU-03 paso 5, SAD 3.2).
+  async search(input: SearchDestinationsInput, now: Date = new Date()): Promise<PublicDestination[]> {
+    const { place, date, people } = input;
+    if (date !== undefined && !isFutureTravelDate(date, now)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+        { field: 'fecha', message: 'La fecha del viaje debe ser posterior a hoy' },
+      ]);
+    }
+
+    const repo = new DestinationRepository(this.dataSource.manager);
+    const destinations = await repo.findActive(place);
+    const reserved =
+      date !== undefined ? await repo.reservedPeopleOn(date, destinations.map((d) => d.id)) : undefined;
+
+    return destinations.map((destination) => {
+      const result: PublicDestination = {
+        id: destination.id,
+        name: destination.name,
+        description: destination.description,
+        place: destination.place,
+        basePrice: destination.basePrice,
+      };
+      if (reserved !== undefined && people !== undefined) {
+        const reservedPeople = reserved.get(destination.id) ?? 0;
+        result.availableSeats = Math.max(destination.dailyCapacity - reservedPeople, 0);
+        result.available = hasCapacity({
+          dailyCapacity: destination.dailyCapacity,
+          reservedPeople,
+          requestedPeople: people,
+        });
+      }
+      return result;
+    });
+  }
+
+
+
+  
   // CU-08: lista todos los destinos con su estado
   list(): Promise<Destination[]> {
     return new DestinationRepository(this.dataSource.manager).findAll();
