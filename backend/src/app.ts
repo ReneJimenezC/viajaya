@@ -10,6 +10,7 @@ import { AppDataSource } from './config/data-source';
 import { Admin } from './models/admin.entity';
 import { AdminRepository } from './repositories/admin.repository';
 import { AuthService } from './services/auth.service';
+import { SessionService } from './services/session.service';
 import { AuthController } from './controllers/auth.controller';
 import { createAuthRouter } from './routes/auth.routes';
 // Tamaño máximo del body: sobra para un login o una reserva (menos de 1 KB)
@@ -33,8 +34,8 @@ export function createApp(): express.Express {
   // repositorio → servicio → controlador → rutas (lo que en Spring hace la inyección)
   const adminRepository = new AdminRepository(AppDataSource.getRepository(Admin));
   const authService = new AuthService(adminRepository, env.jwtSecret);
-  const authController = new AuthController(authService);
-
+    const sessionService = new SessionService(AppDataSource);
+  const authController = new AuthController(authService, sessionService);
   // Registra las rutas. Aquí se sumarán las de los módulos client y admin.
   app.use(healthRouter);
   app.use(createAuthRouter(authController));

@@ -30,3 +30,16 @@ POST http://127.0.0.1:3000/auth/login
 Content-Type: application/json
 
 { "email": "esto-no-es-un-correo", "password": "x" }
+
+
+### --- Refresh token (N-7). Primero ejecuta el "200: login correcto" de arriba. ---
+### REST Client guarda la cookie del login y la manda sola en estas peticiones.
+
+### 200: renovar sesión (access token nuevo + cookie nueva)
+POST http://127.0.0.1:3000/auth/refresh
+
+### 204: cerrar sesión (anula la sesión y borra la cookie)
+POST http://127.0.0.1:3000/auth/logout
+
+### 401: renovar después del logout
+POST http://127.0.0.1:3000/auth/refresh

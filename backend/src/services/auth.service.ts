@@ -22,6 +22,11 @@ export interface LoginResult {
   expiresIn: number;
 }
 
+// El admin ya autenticado: lo necesario para firmar el token
+export interface AuthenticatedAdmin {
+  id: number;
+  role: string;
+}
 // Hash falso para cuando el correo no existe: se verifica igual contra él, así el login
 // tarda lo mismo exista o no el correo (un atacante no puede adivinar correos midiendo
 // el tiempo). Se calcula una sola vez, la primera vez que hace falta.
@@ -46,8 +51,8 @@ export class AuthService {
     void getDummyHash();
   }
 
-  // Recibe correo y contraseña ya validados. Devuelve el access token o lanza 401.
-  async login(input: LoginInput): Promise<LoginResult> {
+   // Recibe correo y contraseña ya validados. Devuelve el admin (id y rol) o lanza 401.
+  async authenticate(input: LoginInput): Promise<AuthenticatedAdmin> {
     const admin = await this.adminRepository.findForLogin(input.email);
 
     // Siempre se ejecuta argon2 (con el hash real o el falso): mismo tiempo en ambos casos
@@ -59,22 +64,24 @@ export class AuthService {
       throw new AppError(401, 'UNAUTHORIZED', 'Correo o contraseña incorrectos');
     }
 
-    const accessToken = await this.signAccessToken(admin.id, admin.role);
-    return { accessToken, tokenType: 'Bearer', expiresIn: ACCESS_TOKEN_TTL_SECONDS };
+    return { id: admin.id, role: admin.role };
   }
 
-  // Crea y firma el JWT (decisión 2). Ejemplo de contenido:
+  
+    // Crea y firma el access token (decisión 2) y arma la respuesta (decisión 1).
+  // La usan el login y la renovación. Ejemplo de contenido del token:
   // { role: 'admin', sub: '3', iss: 'viajaya-api', aud: 'viajaya-admin', iat: ..., exp: iat + 900 }
-  private signAccessToken(adminId: number, role: string): Promise<string> {
+  async issueAccessToken(admin: AuthenticatedAdmin): Promise<LoginResult> {
     // Segundos desde 1970 (Date.now() da milisegundos)
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({ role })
+    const accessToken = await new SignJWT({ role: admin.role })
       .setProtectedHeader({ alg: JWT_ALGORITHM, typ: 'JWT' })
-      .setSubject(String(adminId))
+      .setSubject(String(admin.id))
       .setIssuer(JWT_ISSUER)
       .setAudience(JWT_AUDIENCE)
       .setIssuedAt(now)
       .setExpirationTime(now + ACCESS_TOKEN_TTL_SECONDS)
       .sign(this.secretKey);
+    return { accessToken, tokenType: 'Bearer', expiresIn: ACCESS_TOKEN_TTL_SECONDS };
   }
 }
