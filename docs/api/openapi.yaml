@@ -1,0 +1,335 @@
+# Documentación de la interfaz (API) de ViajaYa en formato OpenAPI 3.1.
+# Describe los endpoints YA implementados. Los del SAD 3.4 que faltan se agregan
+# a este archivo al construir cada módulo.
+openapi: 3.1.0
+
+info:
+  title: ViajaYa API
+  version: 0.1.0
+  summary: API REST del sistema de reservas turísticas ViajaYa (backend).
+  description: |
+    API REST sin estado (SAD 2.1, ADR-03), con dos módulos: `client` (turista) y `admin`.
+
+    **Estado de esta versión (iteración de Construcción):**
+    - Implementado: salud del servicio y autenticación del administrador
+      (login, renovación y cierre de sesión).
+    - Implementado y probado como reglas de dominio (sin endpoint todavía):
+      RN-01 (cupo), RN-02 (ventana de 48 h), RN-03 (tarifa) y RN-04 (pasarela simulada).
+    - Pendiente (SAD 3.4): `GET /destinos`, `POST /cotizaciones`, `POST /reservas`,
+      `POST /reservas/consulta`, `PATCH /reservas/{codigo}/fecha`,
+      `POST /reservas/{codigo}/cancelar`, `/admin/destinos`, `GET /admin/reservas`,
+      `PATCH /admin/pagos/{id}`.
+
+    **Formato de errores (SAD 4):** todas las respuestas de error usan el esquema `Error`.
+    Los mensajes van en español; `code` es fijo y en inglés para que el frontend lo compare.
+
+    **Rutas `/admin/...`:** exigen la cabecera `Authorization: Bearer <accessToken>`
+    (esquema `bearerAuth`). Sin token o con un token inválido o vencido → 401;
+    con un rol distinto de `admin` → 403.
+
+servers:
+  - url: http://127.0.0.1:3000
+    description: Desarrollo local (Docker o npm run dev)
+
+tags:
+  - name: Salud
+    description: Estado del servicio (Docker y Render lo consultan).
+  - name: Autenticación
+    description: Sesión del administrador (SAD 2.3, ADR-06; refresh token N-7).
+
+paths:
+  /health:
+    get:
+      tags: [Salud]
+      operationId: getHealth
+      summary: Indica si la API está en funcionamiento.
+      # Pública: no exige token
+      security: []
+      responses:
+        '200':
+          description: La API responde.
+
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      operationId: login
+      summary: Inicio de sesión del administrador.
+      # Pública: es la ruta que entrega el token
+      security: []
+      description: |
+        Verifica correo y contraseña (hash argon2id, RNF-02). Si son correctos, devuelve un
+        access token JWT de 15 minutos y abre una sesión con un refresh token en la cookie
+        `refresh_token` (HttpOnly, SameSite=Strict, Path=/auth).
+
+        - Límite de intentos (SAD 6): 5 intentos **fallidos** cada 15 minutos por IP; los
+          correctos no cuentan.
+        - El mensaje de error es el mismo si el correo no existe o si la contraseña es
+          incorrecta, y el tiempo de respuesta también (no revela qué correos existen).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: admin@viajaya.test
+              password: una frase larga y segura
+      responses:
+        '200':
+          description: Credenciales correctas.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SetRefreshCookie'
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Correo o contraseña incorrectos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: Correo o contraseña incorrectos
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      tags: [Autenticación]
+      operationId: refreshSession
+      summary: Renueva el access token usando el refresh token de la cookie.
+      description: |
+        No lleva body: el refresh token viaja en la cookie `refresh_token`. Cada uso entrega
+        un access token nuevo y un refresh token nuevo (rotación); el anterior deja de servir.
+
+        - La sesión vence a los 20 minutos sin renovarse y, siempre, a las 8 horas del login.
+        - Si se reutiliza un refresh token ya usado (después de 30 s de gracia), se anula
+          toda la sesión.
+        - Límite: 30 peticiones cada 15 minutos por IP (compartido con `/auth/logout`).
+      security:
+        - refreshCookie: []
+      responses:
+        '200':
+          description: Sesión renovada.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SetRefreshCookie'
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: |
+            La sesión no existe, fue anulada, venció o el token fue reutilizado.
+            La API también borra la cookie.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/ClearRefreshCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: UNAUTHORIZED
+                  message: La sesión expiró o no es válida. Inicia sesión de nuevo.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      tags: [Autenticación]
+      operationId: logout
+      summary: Cierra la sesión del administrador.
+      description: |
+        Anula la sesión del refresh token de la cookie y borra la cookie. Responde 204 aunque
+        la sesión no exista (cerrar sesión dos veces no es un error).
+      security:
+        - refreshCookie: []
+        - {}
+      responses:
+        '204':
+          description: Sesión cerrada.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/ClearRefreshCookie'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access token del administrador (HS256, 15 minutos). Contenido:
+        `sub` (id del admin), `role` (`admin`), `iss` (`viajaya-api`),
+        `aud` (`viajaya-admin`), `iat` y `exp`. Lo exigen las rutas `/admin/...`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Refresh token opaco (43 caracteres base64url). Solo lo envía el navegador a `/auth/...`.
+
+  headers:
+    SetRefreshCookie:
+      description: 'Cookie con el refresh token nuevo: `refresh_token=<token>; Path=/auth; HttpOnly; SameSite=Strict` (y `Secure` en producción).'
+      schema:
+        type: string
+    ClearRefreshCookie:
+      description: Pide al navegador borrar la cookie `refresh_token`.
+      schema:
+        type: string
+    NoStore:
+      description: '`no-store`: las respuestas con tokens no se guardan en ninguna caché.'
+      schema:
+        type: string
+        const: no-store
+    RetryAfter:
+      description: Segundos que faltan para poder intentar de nuevo.
+      schema:
+        type: integer
+        minimum: 0
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Se le quitan los espacios a los lados y se pasa a minúsculas.
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    TokenResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: 'JWT para la cabecera `Authorization: Bearer <accessToken>`.'
+        tokenType:
+          type: string
+          const: Bearer
+        expiresIn:
+          type: integer
+          description: Segundos de vida del access token.
+          const: 900
+      example:
+        accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYWRtaW4ifQ.firma
+        tokenType: Bearer
+        expiresIn: 900
+
+    Error:
+      type: object
+      description: Formato único de errores (SAD 4).
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - PAYLOAD_TOO_LARGE
+                - BUSINESS_RULE
+                - TOO_MANY_REQUESTS
+                - INTERNAL_ERROR
+              description: |
+                400 VALIDATION_ERROR · 401 UNAUTHORIZED · 403 FORBIDDEN · 404 NOT_FOUND ·
+                409 CONFLICT (p. ej. sobrecupo, RN-01) · 413 PAYLOAD_TOO_LARGE ·
+                422 BUSINESS_RULE (p. ej. ventana de 48 h, RN-02) · 429 TOO_MANY_REQUESTS ·
+                500 INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              description: Solo en errores de validación; un elemento por campo.
+              items:
+                type: object
+                required: [field, message]
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    ValidationError:
+      description: Los datos enviados no cumplen el formato (o el JSON está mal escrito).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Los datos enviados no son válidos
+              details:
+                - field: email
+                  message: El correo no tiene un formato válido
+    PayloadTooLarge:
+      description: El body supera los 10 KB.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: PAYLOAD_TOO_LARGE
+              message: La petición es demasiado grande
+    TooManyRequests:
+      description: Se superó el límite de intentos (SAD 6).
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: TOO_MANY_REQUESTS
+              message: Demasiados intentos de inicio de sesión. Intenta de nuevo más tarde.
+    InternalError:
+      description: Error inesperado del servidor; el detalle queda solo en el log.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: Ocurrió un error inesperado
+              
