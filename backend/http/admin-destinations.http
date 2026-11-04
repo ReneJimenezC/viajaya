@@ -1,0 +1,64 @@
+### Pruebas manuales de RF-07 (destinos del administrador) con REST Client.
+### Primero ejecuta "login": guarda el access token para las demás peticiones.
+### Cuando lo pida, escribe la contraseña de ADMIN_PASSWORD del .env, SIN las comillas.
+
+@baseUrl = http://127.0.0.1:3000
+@token = {{login.response.body.accessToken}}
+
+# @name login
+# @prompt password
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@viajaya.test", "password": "{{password}}" }
+
+### 1. Sin token → 401
+GET {{baseUrl}}/admin/destinos
+
+### 2. Listar (CU-08) → 200 con los 5 destinos del seed
+GET {{baseUrl}}/admin/destinos
+Authorization: Bearer {{token}}
+
+### 3. Crear (CU-07) → 201
+POST {{baseUrl}}/admin/destinos
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "name": "Volcán Irazú", "place": "Poás, Alajuela", "description": "Cráter y laguna", "basePrice": 25000, "dailyCapacity": 30 }
+
+### 4. Crear con nombre repetido (CU-07 6a) → 409
+POST {{baseUrl}}/admin/destinos
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "name": "  volcán poás ", "place": "X", "basePrice": 1, "dailyCapacity": 1 }
+
+### 5. Crear con datos inválidos (CU-07 5a) → 400 con details
+POST {{baseUrl}}/admin/destinos
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "name": "", "place": "X", "basePrice": 12.345, "dailyCapacity": 0 }
+
+### 6. Editar el precio del destino 1 (CU-09) → 200
+PATCH {{baseUrl}}/admin/destinos/1
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "basePrice": 45000 }
+
+### 7. Editar un destino que no existe (CU-09 6b) → 404
+PATCH {{baseUrl}}/admin/destinos/9999
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "basePrice": 1 }
+
+### 8. Desactivar el destino creado en la prueba 3 (CU-10) → 200 con "active": false
+### Cambia el 14 por el id que devolvió la prueba 3.
+POST {{baseUrl}}/admin/destinos/14/desactivar
+Authorization: Bearer {{token}}
+
+### 9. Desactivarlo otra vez (CU-10 2a) → 409
+POST {{baseUrl}}/admin/destinos/6/desactivar
+Authorization: Bearer {{token}}
