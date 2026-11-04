@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node --enable-source-maps dist/server.js",
     "typecheck": "tsc --noEmit",
+     "test": "tsx --test \"src/tests/**/*.test.ts\"",
     "migration:run": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:run -d src/config/data-source.ts",
     "migration:revert": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:revert -d src/config/data-source.ts",
     "migration:show": "tsx --env-file=../.env ./node_modules/typeorm/cli.js migration:show -d src/config/data-source.ts",

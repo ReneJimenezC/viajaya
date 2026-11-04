@@ -2,7 +2,7 @@
 // Equivale a un @Service de Spring con la lógica de autenticación.
 
 import { argon2id, hash, verify } from 'argon2';
-import { SignJWT } from 'jose';
+import { SignJWT, errors, jwtVerify, type JWTPayload } from 'jose';
 import { AppError } from '../errors/app-error';
 import type { AdminRepository } from '../repositories/admin.repository';
 import type { LoginInput } from '../models/auth.schema';
@@ -14,6 +14,11 @@ export const JWT_ISSUER = 'viajaya-api';
 export const JWT_AUDIENCE = 'viajaya-admin';
 // Único algoritmo permitido (HMAC con SHA-256)
 export const JWT_ALGORITHM = 'HS256';
+
+// Mensaje único para cualquier access token rechazado (no revela el motivo exacto)
+const INVALID_TOKEN_MESSAGE = 'El token de acceso no es válido o expiró.';
+// "sub" debe ser un id de admin: entero positivo escrito como texto ("3")
+const SUBJECT_PATTERN = /^[1-9]\d*$/;
 
 // Lo que devuelve un login correcto (decisión 1)
 export interface LoginResult {
@@ -83,5 +88,34 @@ export class AuthService {
       .setExpirationTime(now + ACCESS_TOKEN_TTL_SECONDS)
       .sign(this.secretKey);
     return { accessToken, tokenType: 'Bearer', expiresIn: ACCESS_TOKEN_TTL_SECONDS };
+  }
+  
+  // NUEVO (Paso 4): verifica un access token. Devuelve el admin (id y rol) o lanza 401.
+  // No consulta la base (decisión 2 del 03/11): basta con la firma y el contenido.
+  async verifyAccessToken(token: string): Promise<AuthenticatedAdmin> {
+    let payload: JWTPayload;
+    try {
+      ({ payload } = await jwtVerify(token, this.secretKey, {
+        algorithms: [JWT_ALGORITHM],
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
+        requiredClaims: ['sub', 'iat', 'exp'],
+      }));
+    } catch (error) {
+      // Firma mala, vencido, otro emisor/destinatario, otro algoritmo, mal formado...
+      if (error instanceof errors.JOSEError) {
+        throw new AppError(401, 'UNAUTHORIZED', INVALID_TOKEN_MESSAGE);
+      }
+      // Cualquier otra cosa es un fallo nuestro: que llegue como 500
+      throw error;
+    }
+
+    const subject = payload.sub;
+    const role = payload.role;
+    // Firma correcta pero contenido inesperado: también se rechaza
+    if (subject === undefined || !SUBJECT_PATTERN.test(subject) || typeof role !== 'string') {
+      throw new AppError(401, 'UNAUTHORIZED', INVALID_TOKEN_MESSAGE);
+    }
+    return { id: Number(subject), role };
   }
 }
