@@ -11,14 +11,14 @@ info:
     API REST sin estado (SAD 2.1, ADR-03), con dos módulos: `client` (turista) y `admin`.
 
     **Estado de esta versión (iteración de Construcción):**
-    - Implementado: salud del servicio y autenticación del administrador
-      (login, renovación y cierre de sesión).
+    - Implementado: salud del servicio, autenticación del administrador (login, renovación
+      y cierre de sesión), búsqueda de destinos (RF-01) y CRUD de destinos (RF-07).
     - Implementado y probado como reglas de dominio (sin endpoint todavía):
-      RN-01 (cupo), RN-02 (ventana de 48 h), RN-03 (tarifa) y RN-04 (pasarela simulada).
-    - Pendiente (SAD 3.4): `GET /destinos`, `POST /cotizaciones`, `POST /reservas`,
-      `POST /reservas/consulta`, `PATCH /reservas/{codigo}/fecha`,
-      `POST /reservas/{codigo}/cancelar`, `/admin/destinos`, `GET /admin/reservas`,
-      `PATCH /admin/pagos/{id}`.
+      RN-02 (ventana de 48 h), RN-03 (tarifa) y RN-04 (pasarela simulada). RN-01 (cupo) ya
+      se usa en la búsqueda de destinos.
+    - Pendiente (SAD 3.4): `POST /cotizaciones`, `POST /reservas`, `POST /reservas/consulta`,
+      `PATCH /reservas/{codigo}/fecha`, `POST /reservas/{codigo}/cancelar`,
+      `GET /admin/reservas`, `PATCH /admin/pagos/{id}`.
 
     **Formato de errores (SAD 4):** todas las respuestas de error usan el esquema `Error`.
     Los mensajes van en español; `code` es fijo y en inglés para que el frontend lo compare.
@@ -36,6 +36,10 @@ tags:
     description: Estado del servicio (Docker y Render lo consultan).
   - name: Autenticación
     description: Sesión del administrador (SAD 2.3, ADR-06; refresh token N-7).
+  - name: Destinos
+    description: Búsqueda pública de destinos para el turista (RF-01).
+  - name: Admin - Destinos
+    description: Gestión de destinos del administrador (RF-07). Exigen `bearerAuth`.
 
 paths:
   /health:
@@ -174,7 +178,200 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /destinos:
+    get:
+      tags: [Destinos]
+      operationId: searchDestinations
+      summary: Busca destinos activos y, con fecha y personas, su disponibilidad (CU-01).
+      description: |
+        Sin parámetros, lista los destinos activos ordenados por nombre. `fecha` y `personas`
+        van juntas: con ellas, cada destino trae los cupos libres ese día y si alcanzan para
+        el grupo (RN-01; cuentan las reservas Pendiente y Aprobada). Es informativo: al
+        reservar se vuelve a validar el cupo con bloqueo (CU-03, SAD 3.2).
+      security: []
+      parameters:
+        - name: lugar
+          in: query
+          description: Texto que debe contener el lugar, sin distinguir mayúsculas.
+          schema:
+            type: string
+            maxLength: 150
+          example: puntarenas
+        - name: fecha
+          in: query
+          description: Fecha del viaje (AAAA-MM-DD), posterior a hoy en Costa Rica.
+          schema:
+            type: string
+            format: date
+          example: '2026-12-10'
+        - name: personas
+          in: query
+          description: Cantidad de personas, de 1 a 9999.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 9999
+          example: 4
+      responses:
+        '200':
+          description: Destinos encontrados (puede ser una lista vacía).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PublicDestination'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/destinos:
+    get:
+      tags: [Admin - Destinos]
+      operationId: listDestinations
+      summary: Lista todos los destinos, activos e inactivos (CU-08).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Destinos registrados.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Destination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [Admin - Destinos]
+      operationId: createDestination
+      summary: Registra un destino; queda activo (CU-07).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDestinationRequest'
+      responses:
+        '201':
+          description: Destino creado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Destination'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Ya existe un destino con ese nombre (CU-07 6a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/destinos/{id}:
+    patch:
+      tags: [Admin - Destinos]
+      operationId: updateDestination
+      summary: Modifica solo los campos enviados (CU-09).
+      description: |
+        La capacidad diaria no puede quedar por debajo de las personas ya reservadas en un
+        mismo día futuro (422). Bloquea la fila del destino mientras modifica.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DestinationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDestinationRequest'
+      responses:
+        '200':
+          description: Destino actualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Destination'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/DestinationNotFound'
+        '409':
+          description: Ya existe un destino con ese nombre.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: La capacidad es menor que las personas ya reservadas en un día futuro.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/destinos/{id}/desactivar:
+    post:
+      tags: [Admin - Destinos]
+      operationId: deactivateDestination
+      summary: Desactiva un destino activo (CU-10). No se borra; sus reservas se conservan.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DestinationId'
+      responses:
+        '200':
+          description: Destino desactivado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Destination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/DestinationNotFound'
+        '409':
+          description: El destino ya está inactivo (CU-10 2a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
+  parameters:
+    DestinationId:
+      name: id
+      in: path
+      required: true
+      description: Id del destino (entero positivo). Un id inválido responde 404.
+      schema:
+        type: integer
+        minimum: 1
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -211,6 +408,108 @@ components:
         minimum: 0
 
   schemas:
+    Destination:
+      type: object
+      description: Destino completo, como lo ve el administrador.
+      required: [id, name, description, place, basePrice, dailyCapacity, active]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        place:
+          type: string
+        basePrice:
+          type: string
+          description: Precio por persona en colones, con 2 decimales.
+          example: '47500.00'
+        dailyCapacity:
+          type: integer
+        active:
+          type: boolean
+
+    PublicDestination:
+      type: object
+      description: Destino como lo ve el turista. `availableSeats` y `available` solo vienen con fecha y personas.
+      required: [id, name, description, place, basePrice]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: [string, 'null']
+        place:
+          type: string
+        basePrice:
+          type: string
+          example: '30000.00'
+        availableSeats:
+          type: integer
+          description: Cupos libres ese día.
+        available:
+          type: boolean
+          description: Si los cupos libres alcanzan para el grupo (RN-01).
+
+    CreateDestinationRequest:
+      type: object
+      required: [name, place, basePrice, dailyCapacity]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Único sin distinguir mayúsculas ni espacios a los lados.
+        place:
+          type: string
+          minLength: 1
+          maxLength: 150
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+        basePrice:
+          type: number
+          exclusiveMinimum: 0
+          description: Colones, como máximo 2 decimales.
+        dailyCapacity:
+          type: integer
+          minimum: 1
+      example:
+        name: Volcán Poás
+        place: Poás, Alajuela
+        description: Cráter y laguna
+        basePrice: 25000
+        dailyCapacity: 30
+
+    UpdateDestinationRequest:
+      type: object
+      description: Los mismos campos que al crear, todos opcionales, pero al menos uno.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        place:
+          type: string
+          minLength: 1
+          maxLength: 150
+        description:
+          type: [string, 'null']
+          maxLength: 1000
+        basePrice:
+          type: number
+          exclusiveMinimum: 0
+        dailyCapacity:
+          type: integer
+          minimum: 1
+      example:
+        basePrice: 27500
+
     LoginRequest:
       type: object
       required: [email, password]
@@ -286,6 +585,41 @@ components:
                     type: string
 
   responses:
+    Unauthorized:
+      description: Falta el access token, o no es válido o venció.
+      headers:
+        WWW-Authenticate:
+          description: '`Bearer` o `Bearer error="invalid_token"` (RFC 6750).'
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Se requiere iniciar sesión como administrador.
+    Forbidden:
+      description: El token es válido, pero el rol no es `admin`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: FORBIDDEN
+              message: No tienes permiso para realizar esta acción.
+    DestinationNotFound:
+      description: El destino no existe.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: NOT_FOUND
+              message: El destino no existe
     ValidationError:
       description: Los datos enviados no cumplen el formato (o el JSON está mal escrito).
       content:
@@ -332,4 +666,3 @@ components:
             error:
               code: INTERNAL_ERROR
               message: Ocurrió un error inesperado
-              
