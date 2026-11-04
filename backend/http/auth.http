@@ -1,0 +1,32 @@
+# Pruebas manuales del login (3.G.1). Requiere la API corriendo en el puerto 3000.
+
+### 200: login correcto (REST Client te pide la contraseña; no se guarda en el archivo)
+# @prompt password Contraseña del admin de desarrollo
+POST http://127.0.0.1:3000/auth/login
+Content-Type: application/json
+
+{ "email": "  Admin@ViajaYa.TEST ", "password": "{{password}}" }
+
+### 401: contraseña incorrecta
+POST http://127.0.0.1:3000/auth/login
+Content-Type: application/json
+
+{ "email": "admin@viajaya.test", "password": "no-es-la-clave" }
+
+### 401: correo que no existe (mismo mensaje que el anterior)
+POST http://127.0.0.1:3000/auth/login
+Content-Type: application/json
+
+{ "email": "nadie@viajaya.test", "password": "no-es-la-clave" }
+
+### 400: body vacío
+POST http://127.0.0.1:3000/auth/login
+Content-Type: application/json
+
+{}
+
+### 400: correo con formato inválido
+POST http://127.0.0.1:3000/auth/login
+Content-Type: application/json
+
+{ "email": "esto-no-es-un-correo", "password": "x" }
