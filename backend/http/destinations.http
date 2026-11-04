@@ -1,0 +1,21 @@
+### Pruebas manuales de RF-01 (búsqueda pública de destinos). No necesita login.
+
+@baseUrl = http://127.0.0.1:3000
+
+### 1. Todos los destinos activos → 200 (el destino 11 desactivado NO aparece)
+GET {{baseUrl}}/destinos
+
+### 2. Filtrar por lugar → 200 con Monteverde y Manuel Antonio
+GET {{baseUrl}}/destinos?lugar=puntarenas
+
+### 3. Con fecha y personas → 200 con availableSeats y available en cada destino
+GET {{baseUrl}}/destinos?lugar=puntarenas&fecha=2026-12-10&personas=4
+
+### 4. Fecha sin personas (CU-01 4a) → 400
+GET {{baseUrl}}/destinos?fecha=2026-12-10
+
+### 5. Fecha pasada (CU-01 4a) → 400
+GET {{baseUrl}}/destinos?fecha=2026-01-10&personas=2
+
+### 6. Personas 0 → 400
+GET {{baseUrl}}/destinos?fecha=2026-12-10&personas=0

@@ -7,6 +7,7 @@ import { InitialSchema } from '../migrations/001-initial-schema';
 import { Admin } from '../models/admin.entity';
 import { AdminSessions } from '../migrations/002-admin-sessions';
 import { AdminSession } from '../models/admin-session.entity';
+import { Destination } from '../models/destination.entity';
 
 export const AppDataSource = new DataSource({
   // Motor de base de datos; TypeORM usa por debajo el driver "pg"
@@ -14,7 +15,7 @@ export const AppDataSource = new DataSource({
   // Usuario, clave, host, puerto y base salen de una sola URL ya validada en env.ts
   url: env.databaseUrl,
   // Clases @Entity que TypeORM conoce; se agregan una por una en los módulos siguientes
-   entities: [Admin, AdminSession],
+   entities: [Admin, AdminSession, Destination],
     // Migraciones (scripts versionados que crean y cambian tablas); se agregan una por una
    migrations: [InitialSchema, AdminSessions],
   // NUNCA crear ni alterar tablas a partir de las entidades: solo con migraciones (SAD 4)

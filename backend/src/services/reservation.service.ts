@@ -2,12 +2,15 @@
      // Por ahora, las dos reglas como funciones puras (sin base de datos). En el Paso 7, la clase
      // ReservaService las llamará dentro de la transacción, después de bloquear el destino
      // con SELECT ... FOR UPDATE (SAD 3.2).
-     
+
 // RN-02: mover o cancelar solo si faltan MÁS de 48 horas
 const CHANGE_WINDOW_MS = 48 * 60 * 60 * 1000;
 // Hora de referencia: 00:00 de la fecha del viaje en Costa Rica (decisión V).
 // Costa Rica usa UTC-6 todo el año (no tiene horario de verano).
 const COSTA_RICA_OFFSET = '-06:00';
+
+// El mismo desfase en milisegundos (−6 h), para calcular la fecha de hoy en Costa Rica
+const COSTA_RICA_OFFSET_MS = -6 * 60 * 60 * 1000;
 // Fecha del viaje como la guarda Postgres (columna date): "AAAA-MM-DD"
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -50,4 +53,19 @@ export function travelDayStart(travelDate: string): Date {
 //   now = 07/11 23:59 CR → true;  now = 08/11 00:00 CR → false (exactamente 48 h no basta)
 export function canChangeReservation(travelDate: string, now: Date): boolean {
   return travelDayStart(travelDate).getTime() - now.getTime() > CHANGE_WINDOW_MS;
+}
+
+// Fecha de hoy en Costa Rica como "AAAA-MM-DD" (la API corre en UTC en Render).
+// Ejemplo: 2026-11-04T03:00:00Z (21:00 del 03/11 en Costa Rica) → "2026-11-03"
+export function todayInCostaRica(now: Date): string {
+  return new Date(now.getTime() + COSTA_RICA_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+
+// CU-01: true si la fecha del viaje es posterior a hoy (en Costa Rica).
+// Ejemplo con hoy = "2026-11-03": "2026-11-04" → true; "2026-11-03" → false.
+// Las fechas "AAAA-MM-DD" se pueden comparar como texto: el orden alfabético es el cronológico.
+export function isFutureTravelDate(travelDate: string, now: Date): boolean {
+  travelDayStart(travelDate);
+  return travelDate > todayInCostaRica(now);
 }
