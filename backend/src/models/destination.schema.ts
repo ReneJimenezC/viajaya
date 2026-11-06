@@ -97,7 +97,7 @@ function isCalendarDate(value: string): boolean {
 }
 
 // Fecha "AAAA-MM-DD" que existe en el calendario
-const travelDateField = z
+export const travelDateField = z
   .string({ error: 'La fecha debe tener el formato AAAA-MM-DD' })
   .regex(/^\d{4}-\d{2}-\d{2}$/, { error: 'La fecha debe tener el formato AAAA-MM-DD' })
   .refine(isCalendarDate, { error: 'La fecha no existe' });

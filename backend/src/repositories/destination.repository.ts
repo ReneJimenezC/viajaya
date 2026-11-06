@@ -41,6 +41,14 @@ export class DestinationRepository {
     return this.manager.find(Destination, { order: { id: 'ASC' } });
   }
 
+
+
+    // NUEVO (Paso 5): busca un destino por id, SIN bloquearlo: para lecturas informativas
+  // como la cotización (CU-02). Devuelve null si no existe.
+  findById(id: number): Promise<Destination | null> {
+    return this.manager.findOne(Destination, { where: { id } });
+  }
+
   // Busca un destino y BLOQUEA su fila hasta el fin de la transacción (SELECT ... FOR UPDATE).
   // Es el mismo bloqueo que usarán las reservas (SAD 3.2): editar la capacidad y reservar
   // no pueden pasar a la vez sobre el mismo destino.

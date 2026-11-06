@@ -1,0 +1,40 @@
+### Pruebas manuales de RF-02 (cotización, CU-02). Pública: no necesita login.
+### Destinos de tu base: 1 = Volcán Arenal (₡45 000), 4 = Tortuguero (capacidad 20), 14 = Volcán Irazú (desactivado).
+
+@baseUrl = http://127.0.0.1:3000
+
+### 1. Cotización correcta → 200 con destination, travelDate y quote
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 2 }
+
+### 2. Más personas que la capacidad (RN-01) → 409 "Cupos disponibles: 20"
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 21 }
+
+### 3. Destino desactivado (CU-02 1a) → 404
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": 14, "travelDate": "2026-12-10", "people": 1 }
+
+### 4. Destino inexistente → 404 con el mismo mensaje
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": 9999, "travelDate": "2026-12-10", "people": 1 }
+
+### 5. Fecha pasada → 400 (travelDate)
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-01-10", "people": 1 }
+
+### 6. Datos inválidos → 400 con un detalle por campo
+POST {{baseUrl}}/cotizaciones
+Content-Type: application/json
+
+{ "destinationId": "4", "travelDate": "2026-02-30", "people": 0 }

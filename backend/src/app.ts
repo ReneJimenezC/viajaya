@@ -18,6 +18,10 @@ import { AdminDestinationController } from './controllers/admin-destination.cont
 import { createAdminDestinationRouter } from './routes/admin-destination.routes';
 import { DestinationController } from './controllers/destination.controller';
 import { createDestinationRouter } from './routes/destination.routes';
+import { DestinationRepository } from './repositories/destination.repository';
+import { QuoteService } from './services/quote.service';
+import { QuoteController } from './controllers/quote.controller';
+import { createQuoteRouter } from './routes/quote.routes';
 
 
 
@@ -49,8 +53,11 @@ export function createApp(): express.Express {
   // Módulo de destinos (RF-07): servicio → controlador → rutas
   const destinationService = new DestinationService(AppDataSource);
   const adminDestinationController = new AdminDestinationController(destinationService);
+  
   const destinationController = new DestinationController(destinationService);
-
+    // Módulo de cotización (RF-02): repositorio → servicio → controlador → rutas
+  const quoteService = new QuoteService(new DestinationRepository(AppDataSource.manager));
+  const quoteController = new QuoteController(quoteService);
 
 
   // Registra las rutas. Aquí se sumarán las de los módulos client y admin.
@@ -58,7 +65,7 @@ export function createApp(): express.Express {
   app.use(createAuthRouter(authController));
     app.use(createDestinationRouter(destinationController));
     app.use(createAdminDestinationRouter(adminDestinationController, authService));
-  
+    app.use(createQuoteRouter(quoteController));
   // Ninguna ruta atendió la petición → 404
   app.use(notFoundHandler);
   // Siempre al final: convierte cualquier error en JSON
