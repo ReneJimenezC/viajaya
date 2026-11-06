@@ -39,8 +39,9 @@ export function notFoundHandler(_req: Request, _res: Response, next: NextFunctio
 }
 
 // Manejador central. Express lo reconoce como "de errores" porque recibe 4 parámetros.
-// Va AL FINAL de app.ts.
-export function errorHandler(error: unknown, req: Request, res: Response, next: NextFunction): void {
+// Va AL FINAL de app.ts. "_req" lleva guion bajo: se recibe porque Express exige los
+// 4 parámetros, pero no se usa.
+export function errorHandler(error: unknown, _req: Request, res: Response, next: NextFunction): void {
   // Si la respuesta ya empezó a enviarse, no se puede cambiar: se deja a Express
   if (res.headersSent) {
     next(error);
