@@ -1,0 +1,41 @@
+### Pruebas manuales de RF-03 (reservar y pagar, CU-03). Pública: no necesita login.
+### Destinos de tu base: 4 = Tortuguero (capacidad 20, ₡47 500), 14 = Volcán Irazú (desactivado).
+### Ejecútalas EN ORDEN: la 3 depende de las 2 personas que reserva la 1.
+
+@baseUrl = http://127.0.0.1:3000
+
+### 1. Reserva correcta (tarjeta termina en 2 = par) → 201 con code "VY-...", Pendiente y pago Aprobado
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 2, "customerName": "Ana Mora", "customerEmail": " Ana@Correo.com", "cardNumber": "4111111111111112" }
+
+### 2. Tarjeta impar (CU-03 6a) → 402 PAYMENT_DECLINED, no se guarda nada
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 2, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111113" }
+
+### 3. Más personas que el cupo que queda (CU-03 5a) → 409 "Cupos disponibles: 18"
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 19, "customerName": "Grupo", "customerEmail": "grupo@correo.com", "cardNumber": "4111111111111110" }
+
+### 4. Destino desactivado → 404 "El destino no está disponible"
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 14, "travelDate": "2026-12-10", "people": 1, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111112" }
+
+### 5. Fecha pasada → 400 (travelDate)
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-01-10", "people": 1, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111112" }
+
+### 6. Datos inválidos (CU-03 4a) → 400 con un detalle por campo (nombre, correo, tarjeta)
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 1, "customerName": "", "customerEmail": "ana@", "cardNumber": "4111-1111" }

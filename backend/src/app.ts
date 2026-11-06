@@ -22,7 +22,11 @@ import { DestinationRepository } from './repositories/destination.repository';
 import { QuoteService } from './services/quote.service';
 import { QuoteController } from './controllers/quote.controller';
 import { createQuoteRouter } from './routes/quote.routes';
-
+import { ReservationRepository } from './repositories/reservation.repository';
+import { ReservationService } from './services/reservation.service';
+import { SimulatedPaymentGateway } from './services/payment-gateway';
+import { ReservationController } from './controllers/reservation.controller';
+import { createReservationRouter } from './routes/reservation.routes';
 
 
 
@@ -58,7 +62,19 @@ export function createApp(): express.Express {
     // Módulo de cotización (RF-02): repositorio → servicio → controlador → rutas
   const quoteService = new QuoteService(new DestinationRepository(AppDataSource.manager));
   const quoteController = new QuoteController(quoteService);
-
+     // Módulo de reservas (RF-03): cada reserva abre una transacción que entrega los repositorios
+  // que trabajan dentro de ella; la pasarela simulada va por constructor (SAD 2.2, ADR-05)
+  const reservationService = new ReservationService(
+    (work) =>
+      AppDataSource.transaction((manager) =>
+        work({
+          destinations: new DestinationRepository(manager),
+          reservations: new ReservationRepository(manager),
+        }),
+      ),
+    new SimulatedPaymentGateway(),
+  );
+  const reservationController = new ReservationController(reservationService);
 
   // Registra las rutas. Aquí se sumarán las de los módulos client y admin.
   app.use(healthRouter);
@@ -66,6 +82,7 @@ export function createApp(): express.Express {
     app.use(createDestinationRouter(destinationController));
     app.use(createAdminDestinationRouter(adminDestinationController, authService));
     app.use(createQuoteRouter(quoteController));
+      app.use(createReservationRouter(reservationController));
   // Ninguna ruta atendió la petición → 404
   app.use(notFoundHandler);
   // Siempre al final: convierte cualquier error en JSON

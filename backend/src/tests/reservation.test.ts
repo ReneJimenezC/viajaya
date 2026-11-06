@@ -1,0 +1,237 @@
+// Pruebas unitarias de la reserva (RF-03, CU-03): la plantilla del body, el código de
+// confirmación y ReservationService. No usan base de datos (decisión 7 = B): la transacción,
+// los repositorios y la pasarela se reemplazan por versiones falsas en memoria.
+
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { AppError } from '../errors/app-error';
+import type { Destination } from '../models/destination.entity';
+import { createReservationSchema, type CreateReservationInput } from '../models/reservation.schema';
+import type { NewPayment, NewReservation } from '../repositories/reservation.repository';
+import { SimulatedPaymentGateway } from '../services/payment-gateway';
+import {
+  generateConfirmationCode,
+  ReservationService,
+  type RunInTransaction,
+} from '../services/reservation.service';
+
+// 21:00 del 03/11/2026 en Costa Rica: "mañana" es el 04/11
+const NOW = new Date('2026-11-04T03:00:00Z');
+const CREATED_AT = new Date('2026-11-04T03:00:01Z');
+
+// Tortuguero: capacidad 20, ₡47 500, activo. Volcán Irazú: desactivado.
+const TORTUGUERO = {
+  id: 4, name: 'Tortuguero', description: null, place: 'Tortuguero, Limón',
+  basePrice: '47500.00', dailyCapacity: 20, active: true,
+} as Destination;
+const IRAZU = { ...TORTUGUERO, id: 14, name: 'Volcán Irazú', active: false } as Destination;
+
+// Body válido (tarjeta terminada en 2 = par = aprobada)
+const INPUT: CreateReservationInput = {
+  destinationId: 4,
+  travelDate: '2026-11-20',
+  people: 2,
+  customerName: 'Ana Mora',
+  customerEmail: 'ana@correo.com',
+  cardNumber: '4111111111111112',
+};
+
+// Lo que el servicio hizo con la "base" falsa, para revisarlo en cada prueba
+interface Recorder {
+  transactions: number;
+  lockedIds: number[];
+  insertedReservations: NewReservation[];
+  insertedPayments: NewPayment[];
+  charges: number;
+}
+
+// Arma un ReservationService con piezas falsas.
+// - reservedInTortuguero: personas ya reservadas ese día en Tortuguero
+// - takenCodes: códigos que "ya existen" (insertIfNewCode devuelve null con ellos)
+// - codes: códigos que irá entregando el generador, en orden
+function buildService(options: { reservedInTortuguero?: number; takenCodes?: string[]; codes?: string[] } = {}) {
+  const { reservedInTortuguero = 18, takenCodes = [], codes } = options;
+  const recorder: Recorder = { transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0 };
+  const byId = new Map([[TORTUGUERO.id, TORTUGUERO], [IRAZU.id, IRAZU]]);
+
+  // Transacción falsa: cuenta cuántas se abren y entrega repositorios en memoria
+  const runInTransaction: RunInTransaction = async (work) => {
+    recorder.transactions++;
+    return work({
+      destinations: {
+        findByIdForUpdate: async (id: number) => {
+          recorder.lockedIds.push(id);
+          return byId.get(id) ?? null;
+        },
+        reservedPeopleOn: async (_date: string, ids: number[]) =>
+          new Map(ids.includes(TORTUGUERO.id) ? [[TORTUGUERO.id, reservedInTortuguero]] : []),
+      },
+      reservations: {
+        insertIfNewCode: async (data: NewReservation) => {
+          if (takenCodes.includes(data.code)) return null;
+          recorder.insertedReservations.push(data);
+          return { id: 57, createdAt: CREATED_AT };
+        },
+        insertPayment: async (data: NewPayment) => {
+          recorder.insertedPayments.push(data);
+        },
+      },
+    });
+  };
+
+  // Pasarela real (RN-04 ya probada), envuelta para contar los cobros
+  const realGateway = new SimulatedPaymentGateway();
+  const gateway = {
+    charge: (request: { cardNumber: string; amount: string }) => {
+      recorder.charges++;
+      return realGateway.charge(request);
+    },
+  };
+
+  const queue = codes ? [...codes] : undefined;
+  const generateCode = queue ? () => queue.shift() ?? 'VY-ZZZZZZZZ' : undefined;
+  return { service: new ReservationService(runInTransaction, gateway, generateCode), recorder };
+}
+
+// Comprueba que la promesa falle con un AppError del código HTTP indicado y lo devuelve
+async function rejectsWith(promise: Promise<unknown>, status: number): Promise<AppError> {
+  let caught: unknown;
+  await assert.rejects(promise, (error: unknown) => {
+    caught = error;
+    return error instanceof AppError && error.status === status;
+  });
+  return caught as AppError;
+}
+
+describe('createReservationSchema (body de POST /reservas)', () => {
+  test('datos válidos → nombre sin espacios, correo en minúsculas, campos extra fuera', () => {
+    const parsed = createReservationSchema.parse({
+      ...INPUT,
+      customerName: '  Ana Mora ',
+      customerEmail: ' Ana@Correo.COM',
+      total: '1.00',
+    });
+    assert.deepEqual(parsed, INPUT);
+  });
+
+  test('usa las mismas reglas de la cotización (personas 0 → error en people)', () => {
+    const result = createReservationSchema.safeParse({ ...INPUT, people: 0 });
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error!.issues.map((i) => i.path.join('.')), ['people']);
+  });
+
+  test('body vacío → error en los 6 campos', () => {
+    const result = createReservationSchema.safeParse({});
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error!.issues.map((i) => i.path.join('.')).sort(), [
+      'cardNumber', 'customerEmail', 'customerName', 'destinationId', 'people', 'travelDate',
+    ]);
+  });
+
+  test('nombre vacío o de más de 100 caracteres → error', () => {
+    for (const customerName of ['   ', 'a'.repeat(101)]) {
+      assert.equal(createReservationSchema.safeParse({ ...INPUT, customerName }).success, false);
+    }
+  });
+
+  test("nombres reales con tildes, ñ, apóstrofe o guion → válidos", () => {
+    for (const customerName of ["José Peña", "Liam O'Neil", 'María Pérez-Soto']) {
+      assert.equal(createReservationSchema.safeParse({ ...INPUT, customerName }).success, true, customerName);
+    }
+  });
+
+  test('correo sin formato → error', () => {
+    assert.equal(createReservationSchema.safeParse({ ...INPUT, customerEmail: 'ana@' }).success, false);
+  });
+
+  test('tarjeta con guiones, espacios, corta, larga o como número → error', () => {
+    for (const cardNumber of ['4111-1111-1111-1112', '4111 1111 1111 1112', '123456789012', '1'.repeat(20), 4111111111111112]) {
+      assert.equal(createReservationSchema.safeParse({ ...INPUT, cardNumber }).success, false, String(cardNumber));
+    }
+  });
+});
+
+describe('generateConfirmationCode', () => {
+  test('forma "VY-" + 8 caracteres del alfabeto, sin 0, O, 1, I ni L', () => {
+    for (let i = 0; i < 2000; i++) {
+      assert.match(generateConfirmationCode(), /^VY-[2-9A-HJKMNP-Z]{8}$/);
+    }
+  });
+
+  test('2000 códigos seguidos → ninguno repetido', () => {
+    const codes = new Set(Array.from({ length: 2000 }, () => generateConfirmationCode()));
+    assert.equal(codes.size, 2000);
+  });
+});
+
+describe('ReservationService.create (CU-03)', () => {
+  test('cabe justo (18 + 2 = 20) y pago aprobado → reserva Pendiente, pago Aprobado, todo el desglose', async () => {
+    const { service, recorder } = buildService({ codes: ['VY-7K3M9QXT'] });
+    const { reservationId, reservation } = await service.create(INPUT, NOW);
+
+    assert.equal(reservationId, 57);
+    assert.deepEqual(reservation, {
+      code: 'VY-7K3M9QXT',
+      status: 'Pendiente',
+      destination: { id: 4, name: 'Tortuguero', place: 'Tortuguero, Limón' },
+      travelDate: '2026-11-20',
+      customerName: 'Ana Mora',
+      customerEmail: 'ana@correo.com',
+      quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva: '12350.00', total: '107350.00' },
+      payment: { status: 'Aprobado', cardLastDigit: 2 },
+      createdAt: CREATED_AT,
+    });
+    // Se bloqueó el destino antes de todo y se guardaron la reserva y su pago
+    assert.deepEqual(recorder.lockedIds, [4]);
+    assert.equal(recorder.insertedReservations[0]?.total, '107350.00');
+    assert.deepEqual(recorder.insertedPayments, [
+      { reservationId: 57, amount: '107350.00', cardLastDigit: 2, status: 'Aprobado' },
+    ]);
+  });
+
+  test('pago rechazado (tarjeta impar, CU-03 6a) → 402 PAYMENT_DECLINED y no se guarda nada', async () => {
+    const { service, recorder } = buildService();
+    const error = await rejectsWith(service.create({ ...INPUT, cardNumber: '4111111111111113' }, NOW), 402);
+    assert.equal(error.code, 'PAYMENT_DECLINED');
+    assert.equal(recorder.charges, 1);
+    assert.equal(recorder.insertedReservations.length, 0);
+    assert.equal(recorder.insertedPayments.length, 0);
+  });
+
+  test('sin cupo (18 + 3 > 20, CU-03 5a) → 409 con los cupos, sin cobrar ni guardar', async () => {
+    const { service, recorder } = buildService();
+    const error = await rejectsWith(service.create({ ...INPUT, people: 3 }, NOW), 409);
+    assert.match(error.message, /Cupos disponibles: 2$/);
+    assert.equal(recorder.charges, 0);
+    assert.equal(recorder.insertedReservations.length, 0);
+  });
+
+  test('destino desactivado o inexistente → el mismo 404, sin cobrar', async () => {
+    const { service, recorder } = buildService();
+    const inactive = await rejectsWith(service.create({ ...INPUT, destinationId: 14 }, NOW), 404);
+    const missing = await rejectsWith(service.create({ ...INPUT, destinationId: 999 }, NOW), 404);
+    assert.equal(inactive.message, missing.message);
+    assert.equal(recorder.charges, 0);
+  });
+
+  test('fecha de hoy en Costa Rica → 400 travelDate, sin abrir la transacción', async () => {
+    const { service, recorder } = buildService();
+    const error = await rejectsWith(service.create({ ...INPUT, travelDate: '2026-11-03' }, NOW), 400);
+    assert.equal(error.details?.[0]?.field, 'travelDate');
+    assert.equal(recorder.transactions, 0);
+  });
+
+  test('código repetido → se genera otro y la reserva se guarda con el segundo', async () => {
+    const { service, recorder } = buildService({ takenCodes: ['VY-AAAAAAAA'], codes: ['VY-AAAAAAAA', 'VY-BBBBBBBB'] });
+    const { reservation } = await service.create(INPUT, NOW);
+    assert.equal(reservation.code, 'VY-BBBBBBBB');
+    assert.equal(recorder.insertedReservations.length, 1);
+  });
+
+  test('3 códigos repetidos seguidos → error interno (500) y no se guarda el pago', async () => {
+    const taken = ['VY-AAAAAAAA', 'VY-BBBBBBBB', 'VY-CCCCCCCC'];
+    const { service, recorder } = buildService({ takenCodes: taken, codes: taken });
+    await assert.rejects(service.create(INPUT, NOW), (error: unknown) => error instanceof Error && !(error instanceof AppError));
+    assert.equal(recorder.insertedPayments.length, 0);
+  });
+});

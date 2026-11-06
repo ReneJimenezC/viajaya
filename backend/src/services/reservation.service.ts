@@ -1,71 +1,167 @@
-     // ReservaService (SAD 3.1): valida RN-01 (cupo) y RN-02 (ventana de 48 h).
-     // Por ahora, las dos reglas como funciones puras (sin base de datos). En el Paso 7, la clase
-     // ReservaService las llamará dentro de la transacción, después de bloquear el destino
-     // con SELECT ... FOR UPDATE (SAD 3.2).
+// ReservaService (SAD 3.1): crea, consulta, modifica y cancela reservas (RF-03 a RF-06);
+// valida RN-01 y RN-02 y genera el código único. Las reglas puras viven en business-rules.ts;
+// aquí se aplican dentro de la transacción, con el destino bloqueado (SAD 3.2).
 
-// RN-02: mover o cancelar solo si faltan MÁS de 48 horas
-const CHANGE_WINDOW_MS = 48 * 60 * 60 * 1000;
-// Hora de referencia: 00:00 de la fecha del viaje en Costa Rica (decisión V).
-// Costa Rica usa UTC-6 todo el año (no tiene horario de verano).
-const COSTA_RICA_OFFSET = '-06:00';
+import { randomInt } from 'node:crypto';
+import { AppError } from '../errors/app-error';
+import type { PaymentStatus } from '../models/payment.entity';
+import type { ReservationStatus } from '../models/reservation.entity';
+import type { CreateReservationInput } from '../models/reservation.schema';
+import type { DestinationRepository } from '../repositories/destination.repository';
+import type { InsertedReservation, ReservationRepository } from '../repositories/reservation.repository';
+import {
+  calculateQuote,
+  capacityConflict,
+  hasCapacity,
+  isFutureTravelDate,
+  UNAVAILABLE_MESSAGE,
+  type Quote,
+} from './business-rules';
+import type { PaymentGateway } from './payment-gateway';
 
-// El mismo desfase en milisegundos (−6 h), para calcular la fecha de hoy en Costa Rica
-const COSTA_RICA_OFFSET_MS = -6 * 60 * 60 * 1000;
-// Fecha del viaje como la guarda Postgres (columna date): "AAAA-MM-DD"
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+// Prefijo y largo del código (decisión 5 = A): "VY-" + 8 caracteres
+const CODE_PREFIX = 'VY-';
+const CODE_LENGTH = 8;
+// 31 caracteres: dígitos 2-9 y letras A-Z SIN los que se confunden al leer o dictar
+// (0 y O, 1, I y L). 31^8 ≈ 850 mil millones de combinaciones.
+const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+// Intentos si el código generado ya existiera (casi imposible)
+const MAX_CODE_ATTEMPTS = 3;
+// Mensaje de CU-03 6a (decisión 2 = A: 402 PAYMENT_DECLINED)
+const PAYMENT_DECLINED_MESSAGE = 'El pago fue rechazado. Intenta con otra tarjeta.';
 
-// Datos para revisar el cupo de un destino en una fecha
-export interface CapacityCheck {
-  dailyCapacity: number;
-  reservedPeople: number;
-  requestedPeople: number;
+// Genera un código de confirmación con aleatoriedad criptográfica (como SecureRandom).
+// Ejemplo: "VY-7K3M9QXT". Math.random() NO sirve: es predecible.
+export function generateConfirmationCode(): string {
+  let code = CODE_PREFIX;
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    // randomInt(31) da un entero de 0 a 30, sin sesgo
+    code += CODE_ALPHABET.charAt(randomInt(CODE_ALPHABET.length));
+  }
+  return code;
 }
 
-// RN-01: true si las personas ya reservadas más las nuevas caben en la capacidad diaria.
-// Ejemplo: capacidad 20, reservadas 18, pide 2 → true; pide 3 → false.
-export function hasCapacity({ dailyCapacity, reservedPeople, requestedPeople }: CapacityCheck): boolean {
-  for (const value of [dailyCapacity, reservedPeople, requestedPeople]) {
-    if (!Number.isInteger(value) || value < 0) {
-      throw new RangeError(`Valor de cupo inválido: ${value}`);
+// Lo que el servicio necesita de los repositorios dentro de la transacción.
+// Solo esos métodos: así las pruebas pueden pasar repositorios falsos (decisión 7 = B).
+export interface ReservationStores {
+  destinations: Pick<DestinationRepository, 'findByIdForUpdate' | 'reservedPeopleOn'>;
+  reservations: Pick<ReservationRepository, 'insertIfNewCode' | 'insertPayment'>;
+}
+
+// Abre una transacción, le entrega a "work" los repositorios que trabajan dentro de ella,
+// y confirma (commit) si work termina bien o revierte (rollback) si lanza un error.
+// En la app real es AppDataSource.transaction (ver app.ts); en las pruebas, una función falsa.
+export type RunInTransaction = <T>(work: (stores: ReservationStores) => Promise<T>) => Promise<T>;
+
+// Respuesta de POST /reservas (decisión 6 = A): CU-03 paso 9, "toda la información"
+export interface ReservationResult {
+  code: string;
+  status: ReservationStatus;
+  destination: { id: number; name: string; place: string };
+  travelDate: string;
+  customerName: string;
+  customerEmail: string;
+  quote: Quote;
+  payment: { status: PaymentStatus; cardLastDigit: number };
+  createdAt: Date;
+}
+
+// Lo que devuelve create(): la respuesta para el turista y el id interno (solo para el log)
+export interface CreatedReservation {
+  reservationId: number;
+  reservation: ReservationResult;
+}
+
+export class ReservationService {
+  constructor(
+    private readonly runInTransaction: RunInTransaction,
+    private readonly gateway: PaymentGateway,
+    // Se puede cambiar en las pruebas para simular un código repetido
+    private readonly generateCode: () => string = generateConfirmationCode,
+  ) {}
+
+  // CU-03 (flujo del SAD 3.2): fecha futura → transacción → bloquear destino → activo →
+  // cupo (RN-01) → tarifa (RN-03) → cobro (RN-04) → código + reserva + pago → commit.
+  // Si algo falla, se lanza un AppError y la transacción se revierte: no queda nada guardado.
+  async create(input: CreateReservationInput, now: Date = new Date()): Promise<CreatedReservation> {
+    const { destinationId, travelDate, people, customerName, customerEmail, cardNumber } = input;
+
+    // CU-01 / CU-03 4a: la fecha debe ser posterior a hoy en Costa Rica (antes de abrir la transacción)
+    if (!isFutureTravelDate(travelDate, now)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+        { field: 'travelDate', message: 'La fecha del viaje debe ser posterior a hoy' },
+      ]);
     }
+
+    return this.runInTransaction(async ({ destinations, reservations }) => {
+      // SAD 3.2: bloquea la fila del destino (SELECT ... FOR UPDATE). Otra reserva para el
+      // mismo destino espera aquí hasta que esta transacción termine: no hay sobrecupo.
+      const destination = await destinations.findByIdForUpdate(destinationId);
+      if (!destination || !destination.active) {
+        throw new AppError(404, 'NOT_FOUND', UNAVAILABLE_MESSAGE);
+      }
+
+      // CU-03 paso 5 / 5a: RN-01 otra vez, ahora con el bloqueo puesto
+      const reserved = await destinations.reservedPeopleOn(travelDate, [destination.id]);
+      const reservedPeople = reserved.get(destination.id) ?? 0;
+      if (!hasCapacity({ dailyCapacity: destination.dailyCapacity, reservedPeople, requestedPeople: people })) {
+        throw capacityConflict(Math.max(destination.dailyCapacity - reservedPeople, 0));
+      }
+
+      // RN-03: el monto lo calcula el servidor con el precio actual (nunca lo envía el cliente)
+      const quote = calculateQuote(destination.basePrice, people);
+
+      // CU-03 paso 6 / 6a: RN-04. Rechazado → 402 y rollback: sin reserva, sin pago, sin código
+      const payment = await this.gateway.charge({ cardNumber, amount: quote.total });
+      if (!payment.approved) {
+        throw new AppError(402, 'PAYMENT_DECLINED', PAYMENT_DECLINED_MESSAGE);
+      }
+
+      // CU-03 paso 8: código único + reserva. Si el código chocara, se prueba con otro.
+      let code = '';
+      let inserted: InsertedReservation | null = null;
+      for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS && !inserted; attempt++) {
+        code = this.generateCode();
+        inserted = await reservations.insertIfNewCode({
+          code,
+          destinationId: destination.id,
+          customerName,
+          customerEmail,
+          travelDate,
+          people,
+          basePrice: quote.basePrice,
+          subtotal: quote.subtotal,
+          iva: quote.iva,
+          total: quote.total,
+        });
+      }
+      if (!inserted) {
+        // Error nuestro (no del turista): llega como 500 y se revierte todo
+        throw new Error('No se pudo generar un código de confirmación único');
+      }
+
+      // El pago aprobado queda registrado con el último dígito (SAD 6)
+      await reservations.insertPayment({
+        reservationId: inserted.id,
+        amount: quote.total,
+        cardLastDigit: payment.lastDigit,
+        status: 'Aprobado',
+      });
+
+      return {
+        reservationId: inserted.id,
+        reservation: {
+          code,
+          status: 'Pendiente',
+          destination: { id: destination.id, name: destination.name, place: destination.place },
+          travelDate,
+          customerName,
+          customerEmail,
+          quote,
+          payment: { status: 'Aprobado', cardLastDigit: payment.lastDigit },
+          createdAt: inserted.createdAt,
+        },
+      };
+    });
   }
-  if (requestedPeople === 0) {
-    throw new RangeError('La cantidad de personas debe ser mayor que 0');
-  }
-  return reservedPeople + requestedPeople <= dailyCapacity;
-}
-
-// Momento exacto en que empieza el día del viaje en Costa Rica.
-// Ejemplo: "2026-11-10" → 2026-11-10T06:00:00.000Z (00:00 en Costa Rica)
-export function travelDayStart(travelDate: string): Date {
-  // El día en UTC sirve para detectar fechas imposibles: JavaScript convierte
-  // "2026-02-30" en 2 de marzo en vez de dar error, así que se compara de vuelta
-  const sameDayUtc = new Date(`${travelDate}T00:00:00Z`);
-  if (!DATE_PATTERN.test(travelDate) || Number.isNaN(sameDayUtc.getTime()) ||
-      sameDayUtc.toISOString().slice(0, 10) !== travelDate) {
-    throw new RangeError(`Fecha de viaje inválida: "${travelDate}"`);
-  }
-  return new Date(`${travelDate}T00:00:00${COSTA_RICA_OFFSET}`);
-}
-
-// RN-02: true si todavía se puede mover o cancelar (faltan MÁS de 48 h).
-// Ejemplo: viaje "2026-11-10"; el límite es 2026-11-08 00:00 en Costa Rica.
-//   now = 07/11 23:59 CR → true;  now = 08/11 00:00 CR → false (exactamente 48 h no basta)
-export function canChangeReservation(travelDate: string, now: Date): boolean {
-  return travelDayStart(travelDate).getTime() - now.getTime() > CHANGE_WINDOW_MS;
-}
-
-// Fecha de hoy en Costa Rica como "AAAA-MM-DD" (la API corre en UTC en Render).
-// Ejemplo: 2026-11-04T03:00:00Z (21:00 del 03/11 en Costa Rica) → "2026-11-03"
-export function todayInCostaRica(now: Date): string {
-  return new Date(now.getTime() + COSTA_RICA_OFFSET_MS).toISOString().slice(0, 10);
-}
-
-
-// CU-01: true si la fecha del viaje es posterior a hoy (en Costa Rica).
-// Ejemplo con hoy = "2026-11-03": "2026-11-04" → true; "2026-11-03" → false.
-// Las fechas "AAAA-MM-DD" se pueden comparar como texto: el orden alfabético es el cronológico.
-export function isFutureTravelDate(travelDate: string, now: Date): boolean {
-  travelDayStart(travelDate);
-  return travelDate > todayInCostaRica(now);
 }
