@@ -12,11 +12,12 @@ info:
 
     **Estado de esta versión (iteración de Construcción):**
     - Implementado: salud del servicio, autenticación del administrador (login, renovación
-      y cierre de sesión), búsqueda de destinos (RF-01) y CRUD de destinos (RF-07).
+      y cierre de sesión), búsqueda de destinos (RF-01), cotización (RF-02) y CRUD de
+      destinos (RF-07).
     - Implementado y probado como reglas de dominio (sin endpoint todavía):
-      RN-02 (ventana de 48 h), RN-03 (tarifa) y RN-04 (pasarela simulada). RN-01 (cupo) ya
-      se usa en la búsqueda de destinos.
-    - Pendiente (SAD 3.4): `POST /cotizaciones`, `POST /reservas`, `POST /reservas/consulta`,
+      RN-02 (ventana de 48 h) y RN-04 (pasarela simulada). RN-01 (cupo) ya se usa en la
+      búsqueda de destinos y en la cotización; RN-03 (tarifa), en la cotización.
+    - Pendiente (SAD 3.4): `POST /reservas`, `POST /reservas/consulta`,
       `PATCH /reservas/{codigo}/fecha`, `POST /reservas/{codigo}/cancelar`,
       `GET /admin/reservas`, `PATCH /admin/pagos/{id}`.
 
@@ -38,6 +39,8 @@ tags:
     description: Sesión del administrador (SAD 2.3, ADR-06; refresh token N-7).
   - name: Destinos
     description: Búsqueda pública de destinos para el turista (RF-01).
+  - name: Cotización
+    description: Desglose del costo de un viaje antes de reservar (RF-02).
   - name: Admin - Destinos
     description: Gestión de destinos del administrador (RF-07). Exigen `bearerAuth`.
 
@@ -223,6 +226,61 @@ paths:
                   $ref: '#/components/schemas/PublicDestination'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /cotizaciones:
+    post:
+      tags: [Cotización]
+      operationId: createQuote
+      summary: Calcula el desglose del costo de un viaje (CU-02).
+      description: |
+        Revisa que la fecha sea posterior a hoy en Costa Rica, que el destino exista y esté
+        activo, y que haya cupo para el grupo ese día (RN-01). Si todo cumple, devuelve el
+        desglose de RN-03: precio base, subtotal, IVA (13 %) y total.
+
+        - No guarda nada (por eso responde 200 y no 201). Al reservar (CU-03) el servidor
+          vuelve a validar el cupo con bloqueo y vuelve a calcular el total: nunca se acepta
+          un monto enviado por el cliente.
+        - Los montos van como texto con 2 decimales (colones).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+      responses:
+        '200':
+          description: Cotización calculada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          description: El destino no existe o fue desactivado (CU-02 1a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: El destino no está disponible
+        '409':
+          description: No hay cupo suficiente para esa fecha (RN-01). El mensaje indica los cupos disponibles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: 'No hay cupo suficiente para esa fecha. Cupos disponibles: 2'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -509,6 +567,80 @@ components:
           minimum: 1
       example:
         basePrice: 27500
+
+    QuoteRequest:
+      type: object
+      required: [destinationId, travelDate, people]
+      additionalProperties: false
+      properties:
+        destinationId:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        travelDate:
+          type: string
+          format: date
+          description: Fecha del viaje (AAAA-MM-DD), posterior a hoy en Costa Rica.
+        people:
+          type: integer
+          minimum: 1
+          maximum: 9999
+      example:
+        destinationId: 4
+        travelDate: '2026-12-10'
+        people: 2
+
+    Quote:
+      type: object
+      description: Desglose de la tarifa (RN-03). Total = (precio base × personas) × 1.13.
+      required: [basePrice, people, subtotal, iva, total]
+      properties:
+        basePrice:
+          type: string
+          description: Precio por persona en colones, con 2 decimales.
+        people:
+          type: integer
+        subtotal:
+          type: string
+          description: Precio base × personas.
+        iva:
+          type: string
+          description: 13 % del subtotal, redondeado al céntimo (la mitad hacia arriba).
+        total:
+          type: string
+          description: Subtotal + IVA.
+
+    QuoteResult:
+      type: object
+      required: [destination, travelDate, quote]
+      properties:
+        destination:
+          type: object
+          required: [id, name, place]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            place:
+              type: string
+        travelDate:
+          type: string
+          format: date
+        quote:
+          $ref: '#/components/schemas/Quote'
+      example:
+        destination:
+          id: 4
+          name: Tortuguero
+          place: Tortuguero, Limón
+        travelDate: '2026-12-10'
+        quote:
+          basePrice: '47500.00'
+          people: 2
+          subtotal: '95000.00'
+          iva: '12350.00'
+          total: '107350.00'
 
     LoginRequest:
       type: object
