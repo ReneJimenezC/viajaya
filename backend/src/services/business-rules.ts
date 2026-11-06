@@ -1,0 +1,149 @@
+// Reglas de negocio RN-01 a RN-03 como funciones puras (sin base de datos ni Express).
+// SAD 2.2: "una única fuente de verdad para las reglas RN-01 a RN-04". Las usan
+// DestinoService, CotizacionService y ReservaService; ninguno de ellos importa a otro.
+// RN-04 vive aparte, en payment-gateway.ts (SAD: "servicio aislado de pasarela simulada").
+
+import { AppError } from '../errors/app-error';
+
+// ---------------------------------------------------------------------------------------
+// RN-03: tarifa. Total = (precio base × personas) × 1.13. En céntimos enteros, nunca flotantes.
+// ---------------------------------------------------------------------------------------
+
+// IVA de Costa Rica: 13 % (RN-03)
+const IVA_PERCENT = 13;
+// Precio con hasta 2 decimales, sin signo: "42500", "42500.5", "42500.50"
+const PRICE_PATTERN = /^\d+(\.\d{1,2})?$/;
+
+// Desglose de la tarifa; los montos van como texto con 2 decimales, igual que NUMERIC(12,2)
+export interface Quote {
+  basePrice: string;
+  people: number;
+  subtotal: string;
+  iva: string;
+  total: string;
+}
+
+// Convierte un precio a céntimos enteros. Ejemplo: "42500.5" → 4250050
+function toCents(price: string): number {
+  if (!PRICE_PATTERN.test(price)) {
+    throw new RangeError(`Precio inválido: "${price}"`);
+  }
+  const [colones = '0', decimals = ''] = price.split('.');
+  return Number(colones) * 100 + Number(decimals.padEnd(2, '0'));
+}
+
+// Convierte céntimos a texto con 2 decimales. Ejemplo: 4250050 → "42500.50"
+function fromCents(cents: number): string {
+  const colones = Math.floor(cents / 100);
+  const decimals = String(cents % 100).padStart(2, '0');
+  return `${colones}.${decimals}`;
+}
+
+// Calcula la tarifa. Recibe el precio base (como lo devuelve Postgres) y las personas.
+// Ejemplo: calculateQuote('42500.00', 2)
+//   → { basePrice: '42500.00', people: 2, subtotal: '85000.00', iva: '11050.00', total: '96050.00' }
+export function calculateQuote(basePrice: string, people: number): Quote {
+  if (!Number.isInteger(people) || people <= 0) {
+    throw new RangeError(`Cantidad de personas inválida: ${people}`);
+  }
+  const baseCents = toCents(basePrice);
+  if (baseCents <= 0) {
+    throw new RangeError('El precio base debe ser mayor que 0');
+  }
+  const subtotalCents = baseCents * people;
+  // IVA redondeado al céntimo, la mitad hacia arriba (0.005 → 0.01)
+  const ivaCents = Math.floor((subtotalCents * IVA_PERCENT + 50) / 100);
+  const totalCents = subtotalCents + ivaCents;
+  if (!Number.isSafeInteger(totalCents)) {
+    throw new RangeError('Monto demasiado grande');
+  }
+  return {
+    basePrice: fromCents(baseCents),
+    people,
+    subtotal: fromCents(subtotalCents),
+    iva: fromCents(ivaCents),
+    total: fromCents(totalCents),
+  };
+}
+
+// ---------------------------------------------------------------------------------------
+// RN-01 (cupo) y RN-02 (ventana de 48 h), con las fechas en hora de Costa Rica
+// ---------------------------------------------------------------------------------------
+
+// RN-02: mover o cancelar solo si faltan MÁS de 48 horas
+const CHANGE_WINDOW_MS = 48 * 60 * 60 * 1000;
+// Hora de referencia: 00:00 de la fecha del viaje en Costa Rica (decisión V).
+// Costa Rica usa UTC-6 todo el año (no tiene horario de verano).
+const COSTA_RICA_OFFSET = '-06:00';
+// El mismo desfase en milisegundos (−6 h), para calcular la fecha de hoy en Costa Rica
+const COSTA_RICA_OFFSET_MS = -6 * 60 * 60 * 1000;
+// Fecha del viaje como la guarda Postgres (columna date): "AAAA-MM-DD"
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// Datos para revisar el cupo de un destino en una fecha
+export interface CapacityCheck {
+  dailyCapacity: number;
+  reservedPeople: number;
+  requestedPeople: number;
+}
+
+// RN-01: true si las personas ya reservadas más las nuevas caben en la capacidad diaria.
+// Ejemplo: capacidad 20, reservadas 18, pide 2 → true; pide 3 → false.
+export function hasCapacity({ dailyCapacity, reservedPeople, requestedPeople }: CapacityCheck): boolean {
+  for (const value of [dailyCapacity, reservedPeople, requestedPeople]) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RangeError(`Valor de cupo inválido: ${value}`);
+    }
+  }
+  if (requestedPeople === 0) {
+    throw new RangeError('La cantidad de personas debe ser mayor que 0');
+  }
+  return reservedPeople + requestedPeople <= dailyCapacity;
+}
+
+// Momento exacto en que empieza el día del viaje en Costa Rica.
+// Ejemplo: "2026-11-10" → 2026-11-10T06:00:00.000Z (00:00 en Costa Rica)
+export function travelDayStart(travelDate: string): Date {
+  // El día en UTC sirve para detectar fechas imposibles: JavaScript convierte
+  // "2026-02-30" en 2 de marzo en vez de dar error, así que se compara de vuelta
+  const sameDayUtc = new Date(`${travelDate}T00:00:00Z`);
+  if (!DATE_PATTERN.test(travelDate) || Number.isNaN(sameDayUtc.getTime()) ||
+      sameDayUtc.toISOString().slice(0, 10) !== travelDate) {
+    throw new RangeError(`Fecha de viaje inválida: "${travelDate}"`);
+  }
+  return new Date(`${travelDate}T00:00:00${COSTA_RICA_OFFSET}`);
+}
+
+// RN-02: true si todavía se puede mover o cancelar (faltan MÁS de 48 h).
+// Ejemplo: viaje "2026-11-10"; el límite es 2026-11-08 00:00 en Costa Rica.
+//   now = 07/11 23:59 CR → true;  now = 08/11 00:00 CR → false (exactamente 48 h no basta)
+export function canChangeReservation(travelDate: string, now: Date): boolean {
+  return travelDayStart(travelDate).getTime() - now.getTime() > CHANGE_WINDOW_MS;
+}
+
+// Fecha de hoy en Costa Rica como "AAAA-MM-DD" (la API corre en UTC en Render).
+// Ejemplo: 2026-11-04T03:00:00Z (21:00 del 03/11 en Costa Rica) → "2026-11-03"
+export function todayInCostaRica(now: Date): string {
+  return new Date(now.getTime() + COSTA_RICA_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+// CU-01: true si la fecha del viaje es posterior a hoy (en Costa Rica).
+// Ejemplo con hoy = "2026-11-03": "2026-11-04" → true; "2026-11-03" → false.
+// Las fechas "AAAA-MM-DD" se pueden comparar como texto: el orden alfabético es el cronológico.
+export function isFutureTravelDate(travelDate: string, now: Date): boolean {
+  travelDayStart(travelDate);
+  return travelDate > todayInCostaRica(now);
+}
+
+// ---------------------------------------------------------------------------------------
+// Errores compartidos de la cotización (CU-02) y la reserva (CU-03): mismo texto en las dos
+// ---------------------------------------------------------------------------------------
+
+// Destino inexistente o desactivado (CU-02 1a). Ejemplo: 404 "El destino no está disponible"
+export const UNAVAILABLE_MESSAGE = 'El destino no está disponible';
+
+// Sobrecupo (RN-01) con los cupos libres (CU-01 5a).
+// Ejemplo: capacityConflict(2) → 409 "No hay cupo suficiente para esa fecha. Cupos disponibles: 2"
+export function capacityConflict(availableSeats: number): AppError {
+  return new AppError(409, 'CONFLICT', `No hay cupo suficiente para esa fecha. Cupos disponibles: ${availableSeats}`);
+}

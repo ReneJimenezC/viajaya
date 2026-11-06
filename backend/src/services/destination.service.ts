@@ -10,7 +10,7 @@ import type {
   UpdateDestinationInput,
 } from '../models/destination.schema';
 import { DestinationRepository } from '../repositories/destination.repository';
-import { hasCapacity, isFutureTravelDate, todayInCostaRica } from './reservation.service';
+import { hasCapacity, isFutureTravelDate, todayInCostaRica } from './business-rules';
 
 // Mensaje para un id que no existe (CU-09 6b y CU-10 2a)
 const NOT_FOUND_MESSAGE = 'El destino no existe';

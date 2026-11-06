@@ -3,10 +3,9 @@
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateQuote } from '../services/quote.service';
-import { SimulatedPaymentGateway } from '../services/payment-gateway';
-import { canChangeReservation, hasCapacity, travelDayStart } from '../services/reservation.service';
 
+import { SimulatedPaymentGateway } from '../services/payment-gateway';
+import { calculateQuote, canChangeReservation, hasCapacity, travelDayStart } from '../services/business-rules';
 describe('RN-01 cupo diario (hasCapacity)', () => {
   test('cabe justo en la capacidad → true', () => {
     assert.equal(hasCapacity({ dailyCapacity: 20, reservedPeople: 18, requestedPeople: 2 }), true);
