@@ -4,6 +4,11 @@
 
 import type { EntityManager } from 'typeorm';
 import { Payment, type PaymentStatus } from '../models/payment.entity';
+import type { ReservationStatus } from '../models/reservation.entity';
+
+// NUEVO (6.D): estados de una reserva "activa" (decisión 10 = A, CU-04): pendiente o aprobada.
+// Una cancelada no se muestra; tampoco una borrada por el admin (eliminado_en con fecha).
+const ACTIVE_STATES: ReservationStatus[] = ['Pendiente', 'Aprobada'];
 
 // Datos de una reserva nueva (todo ya validado y calculado por el servicio)
 export interface NewReservation {
@@ -31,6 +36,45 @@ export interface NewPayment {
   amount: string;
   cardLastDigit: number;
   status: PaymentStatus;
+}
+
+// NUEVO (6.D): una reserva completa, con su destino y su pago, tal como se le muestra al
+// turista. La arma la consulta (findActiveByCodeAndEmail) y también el servicio al crear una
+// reserva, para que las dos respuestas salgan de la misma función (decisión 11 = A).
+export interface ReservationDetails {
+  code: string;
+  status: ReservationStatus;
+  destination: { id: number; name: string; place: string };
+  travelDate: string;
+  customerName: string;
+  customerEmail: string;
+  people: number;
+  basePrice: string;
+  subtotal: string;
+  iva: string;
+  total: string;
+  payment: { status: PaymentStatus; cardLastDigit: number };
+  createdAt: Date;
+}
+
+// NUEVO (6.D): forma de cada fila que devuelve la consulta de findActiveByCodeAndEmail
+interface ReservationDetailsRow {
+  codigo: string;
+  estado: ReservationStatus;
+  id_destino: number;
+  destino_nombre: string;
+  destino_lugar: string;
+  fecha_viaje: string;
+  nombre_cliente: string;
+  email_cliente: string;
+  cantidad_personas: number;
+  precio_base: string;
+  subtotal: string;
+  iva: string;
+  monto_total: string;
+  pago_estado: PaymentStatus;
+  tarjeta_ultimo_digito: number;
+  creado_en: Date;
 }
 
 export class ReservationRepository {
@@ -66,5 +110,57 @@ export class ReservationRepository {
   // Inserta el pago de una reserva
   async insertPayment(data: NewPayment): Promise<void> {
     await this.manager.insert(Payment, data);
+  }
+
+  // NUEVO (6.D): busca la reserva ACTIVA con ese código Y ese correo (CU-04 paso 5), con su
+  // destino y su pago. Devuelve null si no hay ninguna: no existe, el correo no coincide, está
+  // cancelada o fue borrada (los cuatro casos dan la misma respuesta, sin pistas).
+  // El código ya llega en mayúsculas y el correo en minúsculas, como se guardaron.
+  // Ejemplo: ('VY-F57NXNW9', 'ana@correo.com') → { code: 'VY-F57NXNW9', status: 'Pendiente', ... }
+  async findActiveByCodeAndEmail(code: string, email: string): Promise<ReservationDetails | null> {
+    const rows: ReservationDetailsRow[] = await this.manager.query(
+      // - fecha_viaje::text: así llega "2026-12-10" tal cual (sin ::text, el driver la
+      //   convertiría a un Date de JavaScript con hora y zona)
+      // - JOIN LATERAL: trae el pago MÁS RECIENTE de la reserva (hoy hay uno solo por
+      //   reserva; así ya queda listo si algún día se permiten reintentos, SAD 3.1: 1..N)
+      `SELECT r.codigo, r.estado, r.id_destino, d.nombre AS destino_nombre, d.lugar AS destino_lugar,
+              r.fecha_viaje::text AS fecha_viaje, r.nombre_cliente, r.email_cliente,
+              r.cantidad_personas, r.precio_base, r.subtotal, r.iva, r.monto_total,
+              p.estado AS pago_estado, p.tarjeta_ultimo_digito, r.creado_en
+         FROM reservas r
+         JOIN destinos d ON d.id_destino = r.id_destino
+         JOIN LATERAL (
+              SELECT estado, tarjeta_ultimo_digito
+                FROM pagos
+               WHERE id_reserva = r.id_reserva
+               ORDER BY fecha DESC, id_pago DESC
+               LIMIT 1
+         ) p ON true
+        WHERE r.codigo = $1
+          AND r.email_cliente = $2
+          AND r.estado = ANY($3)
+          AND r.eliminado_en IS NULL`,
+      [code, email, ACTIVE_STATES],
+    );
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    // Se pasa de los nombres de la base (español) a los del código (inglés)
+    return {
+      code: row.codigo,
+      status: row.estado,
+      destination: { id: row.id_destino, name: row.destino_nombre, place: row.destino_lugar },
+      travelDate: row.fecha_viaje,
+      customerName: row.nombre_cliente,
+      customerEmail: row.email_cliente,
+      people: row.cantidad_personas,
+      basePrice: row.precio_base,
+      subtotal: row.subtotal,
+      iva: row.iva,
+      total: row.monto_total,
+      payment: { status: row.pago_estado, cardLastDigit: row.tarjeta_ultimo_digito },
+      createdAt: row.creado_en,
+    };
   }
 }

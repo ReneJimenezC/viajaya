@@ -1,8 +1,8 @@
-// Controlador público de reservas para el turista (RF-03). No exige token.
+// Controlador público de reservas para el turista (RF-03 y RF-04). No exige token.
 
 import type { Request, Response } from 'express';
 import { AppError } from '../errors/app-error';
-import type { CreateReservationInput } from '../models/reservation.schema';
+import type { CreateReservationInput, LookupReservationInput } from '../models/reservation.schema';
 import type { ReservationService } from '../services/reservation.service';
 
 export class ReservationController {
@@ -25,5 +25,13 @@ export class ReservationController {
       // Se relanza: el manejador central arma la respuesta en formato B
       throw error;
     }
+  };
+
+  // NUEVO (6.D): POST /reservas/consulta (CU-04). El body ya pasó por el límite de intentos
+  // y por validate(lookupReservationSchema). Responde 200 con la misma forma que la reserva
+  // creada (decisión 11 = A), o 404 si no hay una reserva activa con esos datos.
+  // No se anota ni el código ni el correo: el log de la petición solo dice "/reservas/consulta".
+  lookup = async (req: Request<unknown, unknown, LookupReservationInput>, res: Response): Promise<void> => {
+    res.json(await this.reservationService.lookup(req.body));
   };
 }

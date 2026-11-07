@@ -1,6 +1,8 @@
-### Pruebas manuales de RF-03 (reservar y pagar, CU-03). Pública: no necesita login.
+### Pruebas manuales de RF-03 (reservar y pagar, CU-03) y RF-04 (consultar, CU-04). Públicas: no necesitan login.
 ### Destinos de tu base: 4 = Tortuguero (capacidad 20, ₡47 500), 14 = Volcán Irazú (desactivado).
 ### Ejecútalas EN ORDEN: la 3 depende de las 2 personas que reserva la 1.
+### Las pruebas 7 a 10 usan la reserva que YA tienes en la base: VY-F57NXNW9 (ana@correo.com).
+### La consulta tiene un límite de 10 intentos FALLIDOS cada 15 min por IP: las pruebas 9 y 10 gastan 2.
 
 @baseUrl = http://127.0.0.1:3000
 
@@ -39,3 +41,27 @@ POST {{baseUrl}}/reservas
 Content-Type: application/json
 
 { "destinationId": 4, "travelDate": "2026-12-10", "people": 1, "customerName": "", "customerEmail": "ana@", "cardNumber": "4111-1111" }
+
+### 7. Consulta correcta (CU-04) → 200 con la reserva completa (la misma forma que la prueba 1)
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com" }
+
+### 8. Código en minúsculas con espacios y correo con mayúsculas → 200 (se normalizan)
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": " vy-f57nxnw9 ", "customerEmail": "ANA@Correo.com" }
+
+### 9. Correo que no coincide (CU-04 5a) → 404 "No se encontró una reserva activa que coincida con los datos"
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "otra@correo.com" }
+
+### 10. Formato inválido (CU-04 4a) → 400 con detalle en code y customerEmail
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-123", "customerEmail": "ana@" }

@@ -1,13 +1,17 @@
-// Pruebas unitarias de la reserva (RF-03, CU-03): la plantilla del body, el código de
-// confirmación y ReservationService. No usan base de datos (decisión 7 = B): la transacción,
-// los repositorios y la pasarela se reemplazan por versiones falsas en memoria.
+// Pruebas unitarias de la reserva (RF-03, CU-03) y de la consulta (RF-04, CU-04): las plantillas
+// del body, el código de confirmación y ReservationService. No usan base de datos (decisión 7 = B):
+// la transacción, los repositorios y la pasarela se reemplazan por versiones falsas en memoria.
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError } from '../errors/app-error';
 import type { Destination } from '../models/destination.entity';
-import { createReservationSchema, type CreateReservationInput } from '../models/reservation.schema';
-import type { NewPayment, NewReservation } from '../repositories/reservation.repository';
+import {
+  createReservationSchema,
+  lookupReservationSchema,
+  type CreateReservationInput,
+} from '../models/reservation.schema';
+import type { NewPayment, NewReservation, ReservationDetails } from '../repositories/reservation.repository';
 import { SimulatedPaymentGateway } from '../services/payment-gateway';
 import {
   generateConfirmationCode,
@@ -43,15 +47,22 @@ interface Recorder {
   insertedReservations: NewReservation[];
   insertedPayments: NewPayment[];
   charges: number;
+  // NUEVO (6.D): con qué código y correo se buscó en la consulta
+  lookups: { code: string; email: string }[];
 }
 
 // Arma un ReservationService con piezas falsas.
 // - reservedInTortuguero: personas ya reservadas ese día en Tortuguero
 // - takenCodes: códigos que "ya existen" (insertIfNewCode devuelve null con ellos)
 // - codes: códigos que irá entregando el generador, en orden
-function buildService(options: { reservedInTortuguero?: number; takenCodes?: string[]; codes?: string[] } = {}) {
-  const { reservedInTortuguero = 18, takenCodes = [], codes } = options;
-  const recorder: Recorder = { transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0 };
+// - stored: NUEVO (6.D) reservas activas que la consulta falsa "encuentra" (por código + correo)
+function buildService(
+  options: { reservedInTortuguero?: number; takenCodes?: string[]; codes?: string[]; stored?: ReservationDetails[] } = {},
+) {
+  const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [] } = options;
+  const recorder: Recorder = {
+    transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [],
+  };
   const byId = new Map([[TORTUGUERO.id, TORTUGUERO], [IRAZU.id, IRAZU]]);
 
   // Transacción falsa: cuenta cuántas se abren y entrega repositorios en memoria
@@ -74,6 +85,11 @@ function buildService(options: { reservedInTortuguero?: number; takenCodes?: str
         },
         insertPayment: async (data: NewPayment) => {
           recorder.insertedPayments.push(data);
+        },
+        // NUEVO (6.D): devuelve la reserva guardada solo si coinciden código Y correo
+        findActiveByCodeAndEmail: async (code: string, email: string) => {
+          recorder.lookups.push({ code, email });
+          return stored.find((r) => r.code === code && r.customerEmail === email) ?? null;
         },
       },
     });
@@ -102,6 +118,23 @@ async function rejectsWith(promise: Promise<unknown>, status: number): Promise<A
   });
   return caught as AppError;
 }
+
+// NUEVO (6.D): la reserva de Ana tal como la devolvería la base en la consulta
+const STORED: ReservationDetails = {
+  code: 'VY-7K3M9QXT',
+  status: 'Pendiente',
+  destination: { id: 4, name: 'Tortuguero', place: 'Tortuguero, Limón' },
+  travelDate: '2026-11-20',
+  customerName: 'Ana Mora',
+  customerEmail: 'ana@correo.com',
+  people: 2,
+  basePrice: '47500.00',
+  subtotal: '95000.00',
+  iva: '12350.00',
+  total: '107350.00',
+  payment: { status: 'Aprobado', cardLastDigit: 2 },
+  createdAt: CREATED_AT,
+};
 
 describe('createReservationSchema (body de POST /reservas)', () => {
   test('datos válidos → nombre sin espacios, correo en minúsculas, campos extra fuera', () => {
@@ -161,6 +194,14 @@ describe('generateConfirmationCode', () => {
   test('2000 códigos seguidos → ninguno repetido', () => {
     const codes = new Set(Array.from({ length: 2000 }, () => generateConfirmationCode()));
     assert.equal(codes.size, 2000);
+  });
+
+  // NUEVO (6.D): lo que se genera y lo que la consulta acepta salen del MISMO alfabeto
+  test('todo código generado pasa la validación de la consulta', () => {
+    for (let i = 0; i < 2000; i++) {
+      const code = generateConfirmationCode();
+      assert.equal(lookupReservationSchema.safeParse({ code, customerEmail: 'ana@correo.com' }).success, true, code);
+    }
   });
 });
 
@@ -233,5 +274,65 @@ describe('ReservationService.create (CU-03)', () => {
     const { service, recorder } = buildService({ takenCodes: taken, codes: taken });
     await assert.rejects(service.create(INPUT, NOW), (error: unknown) => error instanceof Error && !(error instanceof AppError));
     assert.equal(recorder.insertedPayments.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// NUEVO (6.D): consulta de una reserva (RF-04, CU-04)
+// ---------------------------------------------------------------------------------------
+
+describe('lookupReservationSchema (body de POST /reservas/consulta)', () => {
+  test('código en minúsculas y con espacios, correo con mayúsculas → normalizados', () => {
+    assert.deepEqual(
+      lookupReservationSchema.parse({ code: ' vy-7k3m9qxt ', customerEmail: ' Ana@Correo.COM', extra: 1 }),
+      { code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' },
+    );
+  });
+
+  test('código con otra forma o con caracteres que no existen en el alfabeto → error en code', () => {
+    // Corto, otro prefijo, sin guion, largo, con 0/O/1/I/L, como número
+    for (const code of ['VY-123', 'AB-7K3M9QXT', 'VY7K3M9QXT', 'VY-7K3M9QXTA', 'VY-0K3M9QXT', 'VY-OK3M9QXT', 'VY-1K3M9QXT', 'VY-IK3M9QXT', 'VY-LK3M9QXT', 12345678]) {
+      const result = lookupReservationSchema.safeParse({ code, customerEmail: 'ana@correo.com' });
+      assert.equal(result.success, false, String(code));
+      assert.deepEqual(result.error!.issues.map((i) => i.path.join('.')), ['code'], String(code));
+    }
+  });
+
+  test('body vacío → error en los 2 campos', () => {
+    const result = lookupReservationSchema.safeParse({});
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error!.issues.map((i) => i.path.join('.')).sort(), ['code', 'customerEmail']);
+  });
+});
+
+describe('ReservationService.lookup (CU-04)', () => {
+  test('código y correo correctos → la reserva con la MISMA forma que al crearla (decisión 11)', async () => {
+    // Se crea una reserva y luego se consulta la misma: las dos respuestas deben ser idénticas
+    const created = await buildService({ codes: ['VY-7K3M9QXT'] }).service.create(INPUT, NOW);
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const found = await service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' });
+    assert.deepEqual(found, created.reservation);
+    assert.deepEqual(recorder.lookups, [{ code: 'VY-7K3M9QXT', email: 'ana@correo.com' }]);
+  });
+
+  test('correo que no coincide → 404 con el mensaje exacto de CU-04 5a', async () => {
+    const { service } = buildService({ stored: [STORED] });
+    const error = await rejectsWith(service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'otra@correo.com' }), 404);
+    assert.equal(error.message, 'No se encontró una reserva activa que coincida con los datos');
+  });
+
+  test('código inexistente → el mismo 404 que con el correo equivocado (no da pistas)', async () => {
+    const { service } = buildService({ stored: [STORED] });
+    const wrongCode = await rejectsWith(service.lookup({ code: 'VY-AAAAAAAA', customerEmail: 'ana@correo.com' }), 404);
+    const wrongEmail = await rejectsWith(service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'otra@correo.com' }), 404);
+    assert.equal(wrongCode.message, wrongEmail.message);
+  });
+
+  test('la consulta no cobra, no bloquea destinos ni guarda nada', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    await service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' });
+    assert.equal(recorder.charges, 0);
+    assert.deepEqual(recorder.lockedIds, []);
+    assert.equal(recorder.insertedReservations.length + recorder.insertedPayments.length, 0);
   });
 });
