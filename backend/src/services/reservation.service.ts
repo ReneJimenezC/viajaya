@@ -12,6 +12,7 @@ import {
   CONFIRMATION_CODE_PREFIX,
   type CreateReservationInput,
   type LookupReservationInput,
+  type RescheduleReservationInput,
 } from '../models/reservation.schema';
 import type { DestinationRepository } from '../repositories/destination.repository';
 import type {
@@ -21,6 +22,7 @@ import type {
 } from '../repositories/reservation.repository';
 import {
   calculateQuote,
+  canChangeReservation,
   capacityConflict,
   hasCapacity,
   isFutureTravelDate,
@@ -36,6 +38,12 @@ const PAYMENT_DECLINED_MESSAGE = 'El pago fue rechazado. Intenta con otra tarjet
 // NUEVO (6.D): mensaje exacto de CU-04 5a. Es el mismo si el código no existe, si el correo no
 // coincide o si la reserva está cancelada: así no se revela cuál de los datos estaba bien.
 const LOOKUP_NOT_FOUND_MESSAGE = 'No se encontró una reserva activa que coincida con los datos';
+// NUEVO (6.E): mensajes del cambio de fecha
+// CU-05 5a (RN-02): 422 BUSINESS_RULE, como pide el SAD 4
+const RESCHEDULE_WINDOW_MESSAGE =
+  'La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje';
+// V2: el destino fue desactivado después de reservar (sección 7: "mover fecha bloqueado")
+const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
 
 // Genera un código de confirmación con aleatoriedad criptográfica (como SecureRandom).
 // Ejemplo: "VY-7K3M9QXT". Math.random() NO sirve: es predecible.
@@ -53,9 +61,13 @@ export function generateConfirmationCode(): string {
 // Lo que el servicio necesita de los repositorios dentro de la transacción.
 // Solo esos métodos: así las pruebas pueden pasar repositorios falsos (decisión 7 = B).
 // CAMBIO (6.D): se agrega findActiveByCodeAndEmail para la consulta.
+// CAMBIO (6.E): se agregan findActiveForUpdate y updateTravelDate para el cambio de fecha.
 export interface ReservationStores {
   destinations: Pick<DestinationRepository, 'findByIdForUpdate' | 'reservedPeopleOn'>;
-  reservations: Pick<ReservationRepository, 'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail'>;
+  reservations: Pick<
+    ReservationRepository,
+    'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'
+  >;
 }
 
 // Abre una transacción, le entrega a "work" los repositorios que trabajan dentro de ella,
@@ -63,8 +75,8 @@ export interface ReservationStores {
 // En la app real es AppDataSource.transaction (ver app.ts); en las pruebas, una función falsa.
 export type RunInTransaction = <T>(work: (stores: ReservationStores) => Promise<T>) => Promise<T>;
 
-// Respuesta de POST /reservas (decisión 6 = A) y de POST /reservas/consulta (decisión 11 = A):
-// CU-03 paso 9 y CU-04 paso 6, "toda la información" de la reserva
+// Respuesta de POST /reservas (decisión 6 = A), de POST /reservas/consulta (decisión 11 = A) y de
+// PATCH /reservas/fecha (V4): CU-03 paso 9 y CU-04 paso 6, "toda la información" de la reserva
 export interface ReservationResult {
   code: string;
   status: ReservationStatus;
@@ -83,8 +95,11 @@ export interface CreatedReservation {
   reservation: ReservationResult;
 }
 
+// NUEVO (6.E): reschedule() devuelve lo mismo que create(): la respuesta y el id para el log
+export type RescheduledReservation = CreatedReservation;
+
 // NUEVO (6.D): ÚNICA función que arma la respuesta de una reserva (decisión 11 = A, C17).
-// La usan create() y lookup(): si mañana se agrega un campo, se cambia solo aquí.
+// La usan create(), lookup() y reschedule(): si mañana se agrega un campo, se cambia solo aquí.
 // Recibe los datos sueltos y agrupa el desglose de la tarifa en el bloque "quote".
 // Ejemplo: { ..., people: 2, basePrice: '47500.00', subtotal: '95000.00', ... }
 //   → { ..., quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva, total }, ... }
@@ -218,5 +233,71 @@ export class ReservationService {
       throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
     }
     return buildReservationResult(details);
+  }
+
+  // NUEVO (6.E): CU-05 / SAD 3.2 Flujo 2, cambiar la fecha de una reserva activa. Pasos aprobados
+  // (06/11): fecha nueva futura → transacción → bloquear la reserva → RN-02 sobre la fecha ORIGINAL
+  // (422) → fecha distinta (V1, 400) → bloquear el destino → activo (V2, 409) → RN-01 en la fecha
+  // nueva (409) → guardar fecha + reagendas (V3) → la reserva completa (V4). El monto no cambia.
+  // Si algo falla, se lanza un AppError y la transacción se revierte: la reserva queda igual.
+  async reschedule(input: RescheduleReservationInput, now: Date = new Date()): Promise<RescheduledReservation> {
+    const { code, customerEmail, travelDate: newDate } = input;
+
+    // CU-05 paso 8 ("fecha válida"): posterior a hoy en Costa Rica, sin abrir la transacción
+    if (!isFutureTravelDate(newDate, now)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+        { field: 'travelDate', message: 'La fecha del viaje debe ser posterior a hoy' },
+      ]);
+    }
+
+    return this.runInTransaction(async ({ destinations, reservations }) => {
+      // CU-05 paso 4 / 4a: la reserva activa con ese código y correo, BLOQUEADA (SELECT ... FOR UPDATE)
+      const reservation = await reservations.findActiveForUpdate(code, customerEmail);
+      if (!reservation) {
+        throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
+      }
+
+      // CU-05 paso 5 / 5a (RN-02): deben faltar MÁS de 48 h para la fecha ORIGINAL
+      if (!canChangeReservation(reservation.travelDate, now)) {
+        throw new AppError(422, 'BUSINESS_RULE', RESCHEDULE_WINDOW_MESSAGE);
+      }
+
+      // V1: pedir la misma fecha no es un cambio
+      if (newDate === reservation.travelDate) {
+        throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+          { field: 'travelDate', message: 'La nueva fecha debe ser distinta de la actual' },
+        ]);
+      }
+
+      // SAD 3.2: bloquea el destino, el mismo candado que usan las reservas nuevas, así dos
+      // cambios (o un cambio y una reserva) no pueden llenar el mismo día a la vez
+      const destination = await destinations.findByIdForUpdate(reservation.destinationId);
+      if (!destination || !destination.active) {
+        throw new AppError(409, 'CONFLICT', RESCHEDULE_UNAVAILABLE_MESSAGE);
+      }
+
+      // CU-05 paso 8 / 8a (RN-01) en la fecha NUEVA. La reserva todavía está en la fecha vieja,
+      // así que no se cuenta dos veces.
+      const details = await reservations.findActiveByCodeAndEmail(code, customerEmail);
+      if (!details) {
+        // No puede pasar (la fila está bloqueada por esta transacción); si pasara, es un error nuestro
+        throw new Error('La reserva bloqueada no se pudo leer');
+      }
+      const reserved = await destinations.reservedPeopleOn(newDate, [destination.id]);
+      const reservedPeople = reserved.get(destination.id) ?? 0;
+      if (!hasCapacity({ dailyCapacity: destination.dailyCapacity, reservedPeople, requestedPeople: details.people })) {
+        throw capacityConflict(Math.max(destination.dailyCapacity - reservedPeople, 0));
+      }
+
+      // CU-05 paso 9: se guarda la fecha nueva (V3: reagendas + 1). El cupo de la fecha vieja
+      // queda libre solo, porque la reserva ya no cuenta ese día (postcondición 2).
+      await reservations.updateTravelDate(reservation.id, newDate);
+
+      // V4: la misma respuesta de siempre (decisión 11), con la fecha nueva
+      return {
+        reservationId: reservation.id,
+        reservation: buildReservationResult({ ...details, travelDate: newDate }),
+      };
+    });
   }
 }

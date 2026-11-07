@@ -8,6 +8,7 @@ import type { ReservationStatus } from '../models/reservation.entity';
 
 // NUEVO (6.D): estados de una reserva "activa" (decisión 10 = A, CU-04): pendiente o aprobada.
 // Una cancelada no se muestra; tampoco una borrada por el admin (eliminado_en con fecha).
+// La usan la consulta, el cambio de fecha (6.E) y la cancelación (6.F).
 const ACTIVE_STATES: ReservationStatus[] = ['Pendiente', 'Aprobada'];
 
 // Datos de una reserva nueva (todo ya validado y calculado por el servicio)
@@ -55,6 +56,14 @@ export interface ReservationDetails {
   total: string;
   payment: { status: PaymentStatus; cardLastDigit: number };
   createdAt: Date;
+}
+
+// NUEVO (6.E): lo mínimo de una reserva activa para cambiarla (fecha) o cancelarla (6.F).
+// Ejemplo: { id: 1, destinationId: 4, travelDate: '2026-12-10' }
+export interface ActiveReservationRef {
+  id: number;
+  destinationId: number;
+  travelDate: string;
 }
 
 // NUEVO (6.D): forma de cada fila que devuelve la consulta de findActiveByCodeAndEmail
@@ -162,5 +171,33 @@ export class ReservationRepository {
       payment: { status: row.pago_estado, cardLastDigit: row.tarjeta_ultimo_digito },
       createdAt: row.creado_en,
     };
+  }
+
+  // NUEVO (6.E): busca la reserva ACTIVA con ese código y ese correo y BLOQUEA su fila hasta el
+  // fin de la transacción (SELECT ... FOR UPDATE). Si llegan dos cambios a la vez sobre la misma
+  // reserva (dos pestañas, doble clic), el segundo espera al primero. Devuelve null si no hay.
+  // Ejemplo: ('VY-F57NXNW9', 'ana@correo.com') → { id: 1, destinationId: 4, travelDate: '2026-12-10' }
+  async findActiveForUpdate(code: string, email: string): Promise<ActiveReservationRef | null> {
+    const rows: { id_reserva: number; id_destino: number; fecha_viaje: string }[] = await this.manager.query(
+      `SELECT id_reserva, id_destino, fecha_viaje::text AS fecha_viaje
+         FROM reservas
+        WHERE codigo = $1
+          AND email_cliente = $2
+          AND estado = ANY($3)
+          AND eliminado_en IS NULL
+        FOR UPDATE`,
+      [code, email, ACTIVE_STATES],
+    );
+    const row = rows[0];
+    return row ? { id: row.id_reserva, destinationId: row.id_destino, travelDate: row.fecha_viaje } : null;
+  }
+
+  // NUEVO (6.E): cambia la fecha del viaje y suma 1 a "reagendas" (V3). El monto no se toca.
+  // Ejemplo: (1, '2026-12-15') → la reserva 1 queda con fecha 15/12 y reagendas + 1
+  async updateTravelDate(id: number, travelDate: string): Promise<void> {
+    await this.manager.query(
+      'UPDATE reservas SET fecha_viaje = $2, reagendas = reagendas + 1 WHERE id_reserva = $1',
+      [id, travelDate],
+    );
   }
 }

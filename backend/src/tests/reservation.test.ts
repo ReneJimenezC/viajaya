@@ -1,6 +1,7 @@
-// Pruebas unitarias de la reserva (RF-03, CU-03) y de la consulta (RF-04, CU-04): las plantillas
-// del body, el código de confirmación y ReservationService. No usan base de datos (decisión 7 = B):
-// la transacción, los repositorios y la pasarela se reemplazan por versiones falsas en memoria.
+// Pruebas unitarias de la reserva (RF-03, CU-03), la consulta (RF-04, CU-04) y el cambio de fecha
+// (RF-05, CU-05): las plantillas del body, el código de confirmación y ReservationService.
+// No usan base de datos (decisión 7 = B): la transacción, los repositorios y la pasarela se
+// reemplazan por versiones falsas en memoria.
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,6 +10,7 @@ import type { Destination } from '../models/destination.entity';
 import {
   createReservationSchema,
   lookupReservationSchema,
+  rescheduleReservationSchema,
   type CreateReservationInput,
 } from '../models/reservation.schema';
 import type { NewPayment, NewReservation, ReservationDetails } from '../repositories/reservation.repository';
@@ -49,20 +51,26 @@ interface Recorder {
   charges: number;
   // NUEVO (6.D): con qué código y correo se buscó en la consulta
   lookups: { code: string; email: string }[];
+  // NUEVO (6.E): fechas guardadas por updateTravelDate (id de la reserva y fecha nueva)
+  updatedDates: { id: number; travelDate: string }[];
 }
 
 // Arma un ReservationService con piezas falsas.
 // - reservedInTortuguero: personas ya reservadas ese día en Tortuguero
 // - takenCodes: códigos que "ya existen" (insertIfNewCode devuelve null con ellos)
 // - codes: códigos que irá entregando el generador, en orden
-// - stored: NUEVO (6.D) reservas activas que la consulta falsa "encuentra" (por código + correo)
+// - stored: NUEVO (6.D) reservas activas que la consulta falsa "encuentra" (por código + correo).
+//   En 6.E se copian (para que una prueba no cambie las de otra) y su id es su posición + 1.
 function buildService(
   options: { reservedInTortuguero?: number; takenCodes?: string[]; codes?: string[]; stored?: ReservationDetails[] } = {},
 ) {
   const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [] } = options;
   const recorder: Recorder = {
-    transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [],
+    transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [], updatedDates: [],
   };
+  // NUEVO (6.E): copia de las reservas guardadas; updateTravelDate cambia la copia
+  const rows = stored.map((r) => ({ ...r }));
+  const findRow = (code: string, email: string) => rows.find((r) => r.code === code && r.customerEmail === email);
   const byId = new Map([[TORTUGUERO.id, TORTUGUERO], [IRAZU.id, IRAZU]]);
 
   // Transacción falsa: cuenta cuántas se abren y entrega repositorios en memoria
@@ -89,7 +97,18 @@ function buildService(
         // NUEVO (6.D): devuelve la reserva guardada solo si coinciden código Y correo
         findActiveByCodeAndEmail: async (code: string, email: string) => {
           recorder.lookups.push({ code, email });
-          return stored.find((r) => r.code === code && r.customerEmail === email) ?? null;
+          return findRow(code, email) ?? null;
+        },
+        // NUEVO (6.E): la reserva "bloqueada" (id, destino y fecha actual)
+        findActiveForUpdate: async (code: string, email: string) => {
+          const row = findRow(code, email);
+          return row ? { id: rows.indexOf(row) + 1, destinationId: row.destination.id, travelDate: row.travelDate } : null;
+        },
+        // NUEVO (6.E): anota el cambio y lo aplica a la copia
+        updateTravelDate: async (id: number, travelDate: string) => {
+          recorder.updatedDates.push({ id, travelDate });
+          const row = rows[id - 1];
+          if (row) row.travelDate = travelDate;
         },
       },
     });
@@ -334,5 +353,102 @@ describe('ReservationService.lookup (CU-04)', () => {
     assert.equal(recorder.charges, 0);
     assert.deepEqual(recorder.lockedIds, []);
     assert.equal(recorder.insertedReservations.length + recorder.insertedPayments.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// NUEVO (6.E): cambio de fecha (RF-05, CU-05). NOW = 21:00 del 03/11 en Costa Rica.
+// ---------------------------------------------------------------------------------------
+
+// Pide mover la reserva de Ana (viaje el 20/11) al 25/11
+const RESCHEDULE = { code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com', travelDate: '2026-11-25' };
+
+describe('rescheduleReservationSchema (body de PATCH /reservas/fecha)', () => {
+  test('código y correo como en la consulta + fecha nueva → normalizados', () => {
+    assert.deepEqual(
+      rescheduleReservationSchema.parse({ code: ' vy-7k3m9qxt', customerEmail: 'Ana@Correo.com', travelDate: '2026-11-25', people: 9 }),
+      RESCHEDULE,
+    );
+  });
+
+  test('body vacío → error en los 3 campos', () => {
+    const result = rescheduleReservationSchema.safeParse({});
+    assert.equal(result.success, false);
+    assert.deepEqual(result.error!.issues.map((i) => i.path.join('.')).sort(), ['code', 'customerEmail', 'travelDate']);
+  });
+});
+
+describe('ReservationService.reschedule (CU-05)', () => {
+  test('más de 48 h y hay cupo (18 + 2 = 20) → 200 con la fecha nueva, el mismo monto y la misma forma', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const { reservationId, reservation } = await service.reschedule(RESCHEDULE, NOW);
+    assert.equal(reservationId, 1);
+    assert.deepEqual(reservation, {
+      code: 'VY-7K3M9QXT',
+      status: 'Pendiente',
+      destination: { id: 4, name: 'Tortuguero', place: 'Tortuguero, Limón' },
+      travelDate: '2026-11-25',
+      customerName: 'Ana Mora',
+      customerEmail: 'ana@correo.com',
+      quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva: '12350.00', total: '107350.00' },
+      payment: { status: 'Aprobado', cardLastDigit: 2 },
+      createdAt: CREATED_AT,
+    });
+    // Se bloqueó el destino (SAD 3.2) y se guardó la fecha nueva una sola vez
+    assert.deepEqual(recorder.lockedIds, [4]);
+    assert.deepEqual(recorder.updatedDates, [{ id: 1, travelDate: '2026-11-25' }]);
+  });
+
+  test('faltan 48 h o menos para la fecha ORIGINAL (RN-02, CU-05 5a) → 422 y la reserva no cambia', async () => {
+    // Viaje el 05/11: empieza a las 00:00 del 05/11 en CR; desde las 21:00 del 03/11 faltan 27 h
+    const { service, recorder } = buildService({ stored: [{ ...STORED, travelDate: '2026-11-05' }] });
+    const error = await rejectsWith(service.reschedule(RESCHEDULE, NOW), 422);
+    assert.equal(error.code, 'BUSINESS_RULE');
+    assert.equal(error.message, 'La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje');
+    assert.deepEqual(recorder.lockedIds, []);
+    assert.deepEqual(recorder.updatedDates, []);
+  });
+
+  test('código o correo que no coinciden (CU-05 4a) → el mismo 404 de la consulta', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const error = await rejectsWith(service.reschedule({ ...RESCHEDULE, customerEmail: 'otra@correo.com' }, NOW), 404);
+    assert.equal(error.message, 'No se encontró una reserva activa que coincida con los datos');
+    assert.deepEqual(recorder.updatedDates, []);
+  });
+
+  test('la misma fecha que ya tiene (V1) → 400 travelDate y no se guarda nada', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const error = await rejectsWith(service.reschedule({ ...RESCHEDULE, travelDate: '2026-11-20' }, NOW), 400);
+    assert.equal(error.details?.[0]?.message, 'La nueva fecha debe ser distinta de la actual');
+    assert.deepEqual(recorder.updatedDates, []);
+  });
+
+  test('destino desactivado después de reservar (V2) → 409 y no se guarda nada', async () => {
+    const atIrazu = { ...STORED, destination: { id: 14, name: 'Volcán Irazú', place: 'Tortuguero, Limón' } };
+    const { service, recorder } = buildService({ stored: [atIrazu] });
+    const error = await rejectsWith(service.reschedule(RESCHEDULE, NOW), 409);
+    assert.equal(error.message, 'El destino ya no está disponible para cambiar la fecha');
+    assert.deepEqual(recorder.updatedDates, []);
+  });
+
+  test('sin cupo en la fecha nueva (19 + 2 > 20, RN-01, CU-05 8a) → 409 con los cupos y no se guarda nada', async () => {
+    const { service, recorder } = buildService({ stored: [STORED], reservedInTortuguero: 19 });
+    const error = await rejectsWith(service.reschedule(RESCHEDULE, NOW), 409);
+    assert.match(error.message, /Cupos disponibles: 1$/);
+    assert.deepEqual(recorder.updatedDates, []);
+  });
+
+  test('fecha nueva de hoy en Costa Rica → 400 travelDate, sin abrir la transacción', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const error = await rejectsWith(service.reschedule({ ...RESCHEDULE, travelDate: '2026-11-03' }, NOW), 400);
+    assert.equal(error.details?.[0]?.field, 'travelDate');
+    assert.equal(recorder.transactions, 0);
+  });
+
+  test('el cambio no cobra nada (el monto queda igual)', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    await service.reschedule(RESCHEDULE, NOW);
+    assert.equal(recorder.charges, 0);
+    assert.equal(recorder.insertedPayments.length, 0);
   });
 });

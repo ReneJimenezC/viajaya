@@ -2,9 +2,11 @@
 // - POST /reservas (RF-03, CU-03): decisión 3 = A, los 3 campos de la cotización (destino, fecha,
 //   personas) con sus MISMAS reglas (ver quote.schema.ts) + nombre, correo y tarjeta.
 // - POST /reservas/consulta (RF-04, CU-04): decisiones 9 = B y 14 = A, código + correo en el body.
+// - PATCH /reservas/fecha (RF-05, CU-05): decisión 15 = C, código + correo + fecha nueva en el body.
 
 import { z } from 'zod';
 import { emailField } from './auth.schema';
+import { travelDateField } from './destination.schema';
 import { createQuoteSchema } from './quote.schema';
 
 // Largo máximo del nombre del turista (V, decisión 4): el mismo que el nombre de un destino
@@ -71,3 +73,13 @@ export const lookupReservationSchema = z.object(
 
 // Tipo que sale de la plantilla: { code: string; customerEmail: string }
 export type LookupReservationInput = z.infer<typeof lookupReservationSchema>;
+
+// NUEVO (6.E): body de PATCH /reservas/fecha (CU-05, decisión 15 = C). Es la plantilla de la
+// consulta (código + correo) más la fecha NUEVA, con la misma regla de fecha de la cotización.
+// Ejemplo válido: { "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-15" }
+export const rescheduleReservationSchema = lookupReservationSchema.extend({
+  travelDate: travelDateField,
+});
+
+// Tipo que sale de la plantilla: { code: string; customerEmail: string; travelDate: string }
+export type RescheduleReservationInput = z.infer<typeof rescheduleReservationSchema>;

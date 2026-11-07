@@ -1,8 +1,9 @@
-### Pruebas manuales de RF-03 (reservar y pagar, CU-03) y RF-04 (consultar, CU-04). Públicas: no necesitan login.
+### Pruebas manuales de RF-03 (reservar y pagar, CU-03), RF-04 (consultar, CU-04) y RF-05 (cambiar fecha, CU-05).
+### Públicas: no necesitan login.
 ### Destinos de tu base: 4 = Tortuguero (capacidad 20, ₡47 500), 14 = Volcán Irazú (desactivado).
 ### Ejecútalas EN ORDEN: la 3 depende de las 2 personas que reserva la 1.
-### Las pruebas 7 a 10 usan la reserva que YA tienes en la base: VY-F57NXNW9 (ana@correo.com).
-### La consulta tiene un límite de 10 intentos FALLIDOS cada 15 min por IP: las pruebas 9 y 10 gastan 2.
+### Las pruebas 7 a 15 usan la reserva que YA tienes en la base: VY-F57NXNW9 (ana@correo.com, 10/12).
+### La consulta y el cambio de fecha comparten un límite de 10 intentos FALLIDOS cada 15 min por IP.
 
 @baseUrl = http://127.0.0.1:3000
 
@@ -65,3 +66,47 @@ POST {{baseUrl}}/reservas/consulta
 Content-Type: application/json
 
 { "code": "VY-123", "customerEmail": "ana@" }
+
+### 11. Cambio de fecha correcto (CU-05) → 200 con "travelDate": "2026-12-15" y el mismo total
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-15" }
+
+### 12. La misma fecha que ya tiene (V1) → 400 "La nueva fecha debe ser distinta de la actual"
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-15" }
+
+### 13. Correo que no coincide (CU-05 4a) → 404, el mismo mensaje de la consulta
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "otra@correo.com", "travelDate": "2026-12-16" }
+
+### 14. Fecha nueva pasada → 400 (travelDate)
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-01-10" }
+
+### 15. Volver a la fecha original → 200 con "travelDate": "2026-12-10" (deja tu reserva como estaba)
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-10" }
+
+### 16. Prepara la 17: reserva de 1 persona para el 08/11/2026 → 201
+### (Solo sirve hasta el 07/11/2026: después esa fecha ya no es futura y da 400.)
+# @name pronto
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-11-08", "people": 1, "customerName": "Viaje Pronto", "customerEmail": "pronto@correo.com", "cardNumber": "4111111111111112" }
+
+### 17. Faltan 48 h o menos para el viaje (RN-02, CU-05 5a) → 422 BUSINESS_RULE
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "{{pronto.response.body.code}}", "customerEmail": "pronto@correo.com", "travelDate": "2026-12-16" }
