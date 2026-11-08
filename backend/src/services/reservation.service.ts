@@ -44,7 +44,9 @@ const RESCHEDULE_WINDOW_MESSAGE =
   'La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje';
 // V2: el destino fue desactivado después de reservar (sección 7: "mover fecha bloqueado")
 const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
-
+// NUEVO (6.F): CU-06 2a (RN-02): 422 BUSINESS_RULE, como pide el SAD 4
+const CANCEL_WINDOW_MESSAGE =
+  'La reserva no se puede cancelar porque faltan 48 horas o menos para la fecha del viaje';
 // Genera un código de confirmación con aleatoriedad criptográfica (como SecureRandom).
 // Ejemplo: "VY-7K3M9QXT". Math.random() NO sirve: es predecible.
 // CAMBIO (6.D): el prefijo, el largo y el alfabeto vienen de reservation.schema.ts, los mismos
@@ -66,7 +68,8 @@ export interface ReservationStores {
   destinations: Pick<DestinationRepository, 'findByIdForUpdate' | 'reservedPeopleOn'>;
   reservations: Pick<
     ReservationRepository,
-    'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'
+    'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'    // NUEVO (6.F): cancelReservation para la cancelación
+    | 'cancelReservation'
   >;
 }
 
@@ -97,6 +100,9 @@ export interface CreatedReservation {
 
 // NUEVO (6.E): reschedule() devuelve lo mismo que create(): la respuesta y el id para el log
 export type RescheduledReservation = CreatedReservation;
+
+// NUEVO (6.F): cancel() también devuelve lo mismo: la respuesta y el id para el log
+export type CancelledReservation = CreatedReservation;
 
 // NUEVO (6.D): ÚNICA función que arma la respuesta de una reserva (decisión 11 = A, C17).
 // La usan create(), lookup() y reschedule(): si mañana se agrega un campo, se cambia solo aquí.
@@ -297,6 +303,45 @@ export class ReservationService {
       return {
         reservationId: reservation.id,
         reservation: buildReservationResult({ ...details, travelDate: newDate }),
+      };
+    });
+  }
+  
+  // NUEVO (6.F): CU-06 / SAD 3.2 Flujo 2, cancelar una reserva activa. Pasos aprobados (08/11):
+  // transacción → bloquear la RESERVA (contra el doble clic) → RN-02 (422) → estado 'Cancelada'
+  // → la reserva completa (V6). El pago no se toca (V7). El destino NO se bloquea (V8): cancelar
+  // solo libera cupo, nunca lo ocupa. Un destino desactivado no impide cancelar (sección 7).
+  // Si algo falla, se lanza un AppError y la transacción se revierte: la reserva queda igual.
+  async cancel(input: LookupReservationInput, now: Date = new Date()): Promise<CancelledReservation> {
+    const { code, customerEmail } = input;
+
+    return this.runInTransaction(async ({ reservations }) => {
+      // CU-06 precondición: la reserva activa con ese código y correo, BLOQUEADA (SELECT ... FOR
+      // UPDATE). Si llega un segundo clic, espera aquí y luego ya no la encuentra (404).
+      const reservation = await reservations.findActiveForUpdate(code, customerEmail);
+      if (!reservation) {
+        throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
+      }
+
+      // CU-06 paso 2 / 2a (RN-02): deben faltar MÁS de 48 h para la fecha del viaje
+      if (!canChangeReservation(reservation.travelDate, now)) {
+        throw new AppError(422, 'BUSINESS_RULE', CANCEL_WINDOW_MESSAGE);
+      }
+
+      // Los datos completos para la respuesta (se leen ANTES de cancelar: después ya no es activa)
+      const details = await reservations.findActiveByCodeAndEmail(code, customerEmail);
+      if (!details) {
+        // No puede pasar (la fila está bloqueada por esta transacción); si pasara, es un error nuestro
+        throw new Error('La reserva bloqueada no se pudo leer');
+      }
+
+      // CU-06 paso 5: estado 'Cancelada'; el cupo queda libre solo (postcondición)
+      await reservations.cancelReservation(reservation.id);
+
+      // V6: la misma respuesta de siempre (decisión 11), con el estado nuevo
+      return {
+        reservationId: reservation.id,
+        reservation: buildReservationResult({ ...details, status: 'Cancelada' }),
       };
     });
   }

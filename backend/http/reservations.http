@@ -1,9 +1,12 @@
-### Pruebas manuales de RF-03 (reservar y pagar, CU-03), RF-04 (consultar, CU-04) y RF-05 (cambiar fecha, CU-05).
+### Pruebas manuales de RF-03 (reservar y pagar, CU-03), RF-04 (consultar, CU-04), RF-05 (cambiar fecha, CU-05)
+### y RF-06 (cancelar, CU-06).
 ### Públicas: no necesitan login.
 ### Destinos de tu base: 4 = Tortuguero (capacidad 20, ₡47 500), 14 = Volcán Irazú (desactivado).
 ### Ejecútalas EN ORDEN: la 3 depende de las 2 personas que reserva la 1.
 ### Las pruebas 7 a 15 usan la reserva que YA tienes en la base: VY-F57NXNW9 (ana@correo.com, 10/12).
-### La consulta y el cambio de fecha comparten un límite de 10 intentos FALLIDOS cada 15 min por IP.
+### La consulta, el cambio de fecha y la cancelación comparten un límite de 10 intentos FALLIDOS cada 15 min
+### por IP. Este archivo completo gasta 9. Si lo repites, antes: docker compose ... restart api
+### Las fechas de las pruebas 16 y 18 se calculan solas desde HOY (con $localDatetime), así no se vencen.
 
 @baseUrl = http://127.0.0.1:3000
 
@@ -97,16 +100,46 @@ Content-Type: application/json
 
 { "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-10" }
 
-### 16. Prepara la 17: reserva de 1 persona para el 08/11/2026 → 201
-### (Solo sirve hasta el 07/11/2026: después esa fecha ya no es futura y da 400.)
+### 16. Prepara la 17 y la 22: reserva de 1 persona para MAÑANA (faltan menos de 48 h) → 201
 # @name pronto
 POST {{baseUrl}}/reservas
 Content-Type: application/json
 
-{ "destinationId": 4, "travelDate": "2026-11-08", "people": 1, "customerName": "Viaje Pronto", "customerEmail": "pronto@correo.com", "cardNumber": "4111111111111112" }
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 1 d}}", "people": 1, "customerName": "Viaje Pronto", "customerEmail": "pronto@correo.com", "cardNumber": "4111111111111112" }
 
 ### 17. Faltan 48 h o menos para el viaje (RN-02, CU-05 5a) → 422 BUSINESS_RULE
 PATCH {{baseUrl}}/reservas/fecha
 Content-Type: application/json
 
 { "code": "{{pronto.response.body.code}}", "customerEmail": "pronto@correo.com", "travelDate": "2026-12-16" }
+
+### 18. Prepara la cancelación: reserva de 2 personas para dentro de 30 días → 201
+# @name paraCancelar
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 30 d}}", "people": 2, "customerName": "Carla Rojas", "customerEmail": "carla@correo.com", "cardNumber": "4111111111111112" }
+
+### 19. Cancelación correcta (CU-06) → 200 con "status": "Cancelada" y el pago sigue "Aprobado"
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 20. Cancelar otra vez la misma (doble clic) → 404, ya no está activa
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 21. Consultar la cancelada (decisión 10) → 404
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 22. Faltan 48 h o menos (RN-02, CU-06 2a): cancelar la reserva de mañana de la prueba 16 → 422 BUSINESS_RULE
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{pronto.response.body.code}}", "customerEmail": "pronto@correo.com" }

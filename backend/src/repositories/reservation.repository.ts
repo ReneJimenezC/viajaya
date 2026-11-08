@@ -200,4 +200,11 @@ export class ReservationRepository {
       [id, travelDate],
     );
   }
+
+  // NUEVO (6.F): marca la reserva como cancelada (CU-06 paso 5). Con eso deja de contar para el
+  // cupo (reservedPeopleOn solo suma Pendiente y Aprobada) y la consulta ya no la encuentra.
+  // El pago no se toca (V7). Ejemplo: (1) → la reserva 1 queda con estado 'Cancelada'
+  async cancelReservation(id: number): Promise<void> {
+    await this.manager.query("UPDATE reservas SET estado = 'Cancelada' WHERE id_reserva = $1", [id]);
+  }
 }

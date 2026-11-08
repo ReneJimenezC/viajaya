@@ -1,4 +1,4 @@
-// Rutas públicas de reservas (RF-03, RF-04 y RF-05, SAD 3.4).
+// Rutas públicas de reservas (RF-03 a RF-06, SAD 3.4).
 
 import { Router } from 'express';
 import type { ReservationController } from '../controllers/reservation.controller';
@@ -20,5 +20,8 @@ export function createReservationRouter(controller: ReservationController): Rout
   // NUEVO (6.E): cambio de fecha (decisión 15 = C, N-4: el SAD dice PATCH /reservas/:codigo/fecha;
   // aquí el código va en el body). Mismo límite de intentos que la consulta (un solo contador).
   router.patch('/reservas/fecha', lookupRateLimit, validate(rescheduleReservationSchema), controller.reschedule);
+    // NUEVO (6.F): cancelación (decisión 15 = C, N-4: el SAD dice POST /reservas/:codigo/cancelar;
+  // aquí el código va en el body). Misma plantilla y mismo límite de intentos que la consulta.
+  router.post('/reservas/cancelar', lookupRateLimit, validate(lookupReservationSchema), controller.cancel);
   return router;
 }

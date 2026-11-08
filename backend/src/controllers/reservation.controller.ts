@@ -47,4 +47,14 @@ export class ReservationController {
     req.log.info({ event: 'reservation_rescheduled', reservationId }, 'Fecha de reserva cambiada');
     res.json(reservation);
   };
+
+  
+  // NUEVO (6.F): POST /reservas/cancelar (CU-06). El body ya pasó por el límite de intentos y por
+  // validate(lookupReservationSchema). Responde 200 con la reserva y "status": "Cancelada" (V6).
+  cancel = async (req: Request<unknown, unknown, LookupReservationInput>, res: Response): Promise<void> => {
+    const { reservationId, reservation } = await this.reservationService.cancel(req.body);
+    // Auditoría (SAD 4: eventos de cancelación): solo el id interno, sin código ni correo
+    req.log.info({ event: 'reservation_cancelled', reservationId }, 'Reserva cancelada');
+    res.json(reservation);
+  };
 }

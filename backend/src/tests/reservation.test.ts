@@ -1,5 +1,6 @@
-// Pruebas unitarias de la reserva (RF-03, CU-03), la consulta (RF-04, CU-04) y el cambio de fecha
-// (RF-05, CU-05): las plantillas del body, el código de confirmación y ReservationService.
+// Pruebas unitarias de la reserva (RF-03, CU-03), la consulta (RF-04, CU-04), el cambio de fecha
+// (RF-05, CU-05) y la cancelación (RF-06, CU-06): las plantillas del body, el código de
+// confirmación y ReservationService.
 // No usan base de datos (decisión 7 = B): la transacción, los repositorios y la pasarela se
 // reemplazan por versiones falsas en memoria.
 
@@ -53,6 +54,8 @@ interface Recorder {
   lookups: { code: string; email: string }[];
   // NUEVO (6.E): fechas guardadas por updateTravelDate (id de la reserva y fecha nueva)
   updatedDates: { id: number; travelDate: string }[];
+  // NUEVO (6.F): ids de las reservas canceladas por cancelReservation
+  cancelledIds: number[];
 }
 
 // Arma un ReservationService con piezas falsas.
@@ -66,11 +69,13 @@ function buildService(
 ) {
   const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [] } = options;
   const recorder: Recorder = {
-    transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [], updatedDates: [],
+    transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [], updatedDates: [], cancelledIds: [],
   };
   // NUEVO (6.E): copia de las reservas guardadas; updateTravelDate cambia la copia
   const rows = stored.map((r) => ({ ...r }));
-  const findRow = (code: string, email: string) => rows.find((r) => r.code === code && r.customerEmail === email);
+  // CAMBIO (6.F): como la base real, solo encuentra reservas ACTIVAS (una cancelada ya no aparece)
+  const findRow = (code: string, email: string) =>
+    rows.find((r) => r.code === code && r.customerEmail === email && r.status !== 'Cancelada');
   const byId = new Map([[TORTUGUERO.id, TORTUGUERO], [IRAZU.id, IRAZU]]);
 
   // Transacción falsa: cuenta cuántas se abren y entrega repositorios en memoria
@@ -103,6 +108,12 @@ function buildService(
         findActiveForUpdate: async (code: string, email: string) => {
           const row = findRow(code, email);
           return row ? { id: rows.indexOf(row) + 1, destinationId: row.destination.id, travelDate: row.travelDate } : null;
+        },
+        // NUEVO (6.F): anota la cancelación y la aplica a la copia
+        cancelReservation: async (id: number) => {
+          recorder.cancelledIds.push(id);
+          const row = rows[id - 1];
+          if (row) row.status = 'Cancelada';
         },
         // NUEVO (6.E): anota el cambio y lo aplica a la copia
         updateTravelDate: async (id: number, travelDate: string) => {
@@ -450,5 +461,72 @@ describe('ReservationService.reschedule (CU-05)', () => {
     await service.reschedule(RESCHEDULE, NOW);
     assert.equal(recorder.charges, 0);
     assert.equal(recorder.insertedPayments.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// NUEVO (6.F): cancelación (RF-06, CU-06). NOW = 21:00 del 03/11 en Costa Rica.
+// La plantilla del body es la de la consulta (lookupReservationSchema), ya probada arriba.
+// ---------------------------------------------------------------------------------------
+
+// Pide cancelar la reserva de Ana (viaje el 20/11)
+const CANCEL = { code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' };
+
+describe('ReservationService.cancel (CU-06)', () => {
+  test('más de 48 h → 200 con status Cancelada y la misma forma de siempre (V6)', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const { reservationId, reservation } = await service.cancel(CANCEL, NOW);
+    assert.equal(reservationId, 1);
+    assert.deepEqual(reservation, {
+      code: 'VY-7K3M9QXT',
+      status: 'Cancelada',
+      destination: { id: 4, name: 'Tortuguero', place: 'Tortuguero, Limón' },
+      travelDate: '2026-11-20',
+      customerName: 'Ana Mora',
+      customerEmail: 'ana@correo.com',
+      quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva: '12350.00', total: '107350.00' },
+      // V7: el pago sigue Aprobado
+      payment: { status: 'Aprobado', cardLastDigit: 2 },
+      createdAt: CREATED_AT,
+    });
+    assert.deepEqual(recorder.cancelledIds, [1]);
+  });
+
+  test('no bloquea el destino, no cobra ni toca pagos (V7 y V8)', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    await service.cancel(CANCEL, NOW);
+    assert.deepEqual(recorder.lockedIds, []);
+    assert.equal(recorder.charges, 0);
+    assert.equal(recorder.insertedPayments.length, 0);
+  });
+
+  test('faltan 48 h o menos (RN-02, CU-06 2a) → 422 y la reserva no cambia', async () => {
+    // Viaje el 05/11: desde las 21:00 del 03/11 faltan 27 h
+    const { service, recorder } = buildService({ stored: [{ ...STORED, travelDate: '2026-11-05' }] });
+    const error = await rejectsWith(service.cancel(CANCEL, NOW), 422);
+    assert.equal(error.code, 'BUSINESS_RULE');
+    assert.equal(error.message, 'La reserva no se puede cancelar porque faltan 48 horas o menos para la fecha del viaje');
+    assert.deepEqual(recorder.cancelledIds, []);
+  });
+
+  test('código o correo que no coinciden → el mismo 404 de la consulta', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    const error = await rejectsWith(service.cancel({ ...CANCEL, customerEmail: 'otra@correo.com' }, NOW), 404);
+    assert.equal(error.message, 'No se encontró una reserva activa que coincida con los datos');
+    assert.deepEqual(recorder.cancelledIds, []);
+  });
+
+  test('cancelar dos veces (doble clic) → la segunda da 404 y solo se cancela una vez', async () => {
+    const { service, recorder } = buildService({ stored: [STORED] });
+    await service.cancel(CANCEL, NOW);
+    await rejectsWith(service.cancel(CANCEL, NOW), 404);
+    assert.deepEqual(recorder.cancelledIds, [1]);
+  });
+
+  test('destino desactivado después de reservar → sí se puede cancelar (sección 7)', async () => {
+    const atIrazu = { ...STORED, destination: { id: 14, name: 'Volcán Irazú', place: 'Tortuguero, Limón' } };
+    const { service } = buildService({ stored: [atIrazu] });
+    const { reservation } = await service.cancel(CANCEL, NOW);
+    assert.equal(reservation.status, 'Cancelada');
   });
 });
