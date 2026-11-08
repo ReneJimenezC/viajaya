@@ -2,7 +2,11 @@
 // requireAdmin (y las acciones por validate), así que req.admin existe y el body está limpio.
 
 import type { Request, Response } from 'express';
-import type { AdminActionInput, ChangePaymentStatusInput } from '../models/admin-reservation.schema';
+import type {
+  AdminActionInput,
+  AdminRescheduleInput,
+  ChangePaymentStatusInput,
+} from '../models/admin-reservation.schema';
 import type { AdminReservationService } from '../services/admin-reservation.service';
 import { parseId } from './parse-id';
 
@@ -80,6 +84,23 @@ export class AdminReservationController {
     req.log.info(
       { event: 'payment_status_changed', paymentId, reservationId: reservation.id, adminId, status: req.body.status },
       'Estado del pago cambiado',
+    );
+    res.json(reservation);
+  };
+
+  
+  // NUEVO (8.G) PATCH /admin/reservas/:id/fecha (N-2a). 200 con la reserva y su fecha nueva (V44).
+  reschedule = async (req: Request<{ id: string }, unknown, AdminRescheduleInput>, res: Response): Promise<void> => {
+    const adminId = adminIdOf(req);
+    const reservation = await this.adminReservationService.reschedule(
+      parseId(req.params.id, NOT_FOUND_MESSAGE),
+      adminId,
+      req.body,
+    );
+    // Auditoría (SAD 4, V44): ids internos; el motivo y las fechas quedan en el historial de la base
+    req.log.info(
+      { event: 'reservation_rescheduled_by_admin', reservationId: reservation.id, adminId },
+      'Reserva reagendada por el administrador',
     );
     res.json(reservation);
   };

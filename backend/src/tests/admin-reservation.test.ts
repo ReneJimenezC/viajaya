@@ -5,7 +5,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError } from '../errors/app-error';
-import { adminActionSchema, changePaymentStatusSchema } from '../models/admin-reservation.schema';
+import { adminActionSchema, adminRescheduleSchema, changePaymentStatusSchema } from '../models/admin-reservation.schema';
+import type { Destination } from '../models/destination.entity';
 import type { PaymentStatus } from '../models/payment.entity';
 import type { NewAdminAction } from '../repositories/admin-action.repository';
 import type { AdminReservationDetails } from '../repositories/reservation.repository';
@@ -16,6 +17,12 @@ const CREATED_AT = new Date('2026-11-04T03:00:01Z');
 const NOW = new Date('2026-11-08T18:00:00Z');
 // Admin que hace las acciones (como req.admin.id)
 const ADMIN_ID = 3;
+// NUEVO (8.G): destinos falsos (Tortuguero activo, capacidad 20; Irazú desactivado)
+const TORTUGUERO = {
+  id: 4, name: 'Tortuguero', description: null, place: 'Tortuguero, Limón',
+  basePrice: '47500.00', dailyCapacity: 20, active: true,
+} as Destination;
+const IRAZU = { ...TORTUGUERO, id: 14, name: 'Volcán Irazú', active: false } as Destination;
 
 // Reserva de Ana tal como la devuelve el repositorio (findAllForAdmin)
 const ANA: AdminReservationDetails = {
@@ -73,19 +80,29 @@ interface Recorder {
   actions: NewAdminAction[];
   // NUEVO (8.F): pagos cambiados por updatePaymentStatus
   paymentUpdates: { paymentId: number; status: PaymentStatus }[];
+  // NUEVO (8.G): destinos bloqueados y fechas cambiadas por updateTravelDate
+  lockedDestinationIds: number[];
+  updatedDates: { id: number; travelDate: string }[];
 }
 
 // Arma un AdminReservationService con piezas falsas.
 // - stored: reservas guardadas, ya en el orden de la base (V16). Se COPIAN: así una prueba no
 //   cambia los datos de otra. Las "eliminadas" (markDeleted) dejan de aparecer, como en la base.
 // - oldPayments: NUEVO (8.F) intentos de pago ANTERIORES de una reserva (no son el más reciente, V32)
+// - reservedInTortuguero: NUEVO (8.G) personas ya reservadas en Tortuguero en la fecha NUEVA
 function buildService(
-  options: { stored?: AdminReservationDetails[]; oldPayments?: { paymentId: number; reservationId: number }[] } = {},
+  options: {
+    stored?: AdminReservationDetails[];
+    oldPayments?: { paymentId: number; reservationId: number }[];
+    reservedInTortuguero?: number;
+  } = {},
 ) {
-  const { stored = [], oldPayments = [] } = options;
+  const { stored = [], oldPayments = [], reservedInTortuguero = 0 } = options;
   const recorder: Recorder = {
     transactions: 0, lockedIds: [], approvedIds: [], cancelledIds: [], deletedIds: [], actions: [], paymentUpdates: [],
+    lockedDestinationIds: [], updatedDates: [],
   };
+  const destinationsById = new Map([[TORTUGUERO.id, TORTUGUERO], [IRAZU.id, IRAZU]]);
   const rows = stored.map((r) => ({ ...r, payment: { ...r.payment } }));
   const deleted = new Set<number>();
   const visible = () => rows.filter((r) => !deleted.has(r.id));
@@ -103,8 +120,12 @@ function buildService(
         findByIdForUpdate: async (id) => {
           recorder.lockedIds.push(id);
           const row = byId(id);
+          // CAMBIO (8.G): también el destino y las personas
           return row
-            ? { id: row.id, status: row.status, travelDate: row.travelDate, paymentStatus: row.payment.status }
+            ? {
+                id: row.id, status: row.status, travelDate: row.travelDate, paymentStatus: row.payment.status,
+                destinationId: row.destination.id, people: row.people,
+              }
             : null;
         },
         findDetailsById: async (id) => {
@@ -144,6 +165,24 @@ function buildService(
           const row = rows.find((r) => r.paymentId === paymentId);
           if (row) row.payment.status = status;
         },
+        // NUEVO (8.G): cambia la fecha y suma una reagenda, como la base
+        updateTravelDate: async (id, travelDate) => {
+          recorder.updatedDates.push({ id, travelDate });
+          const row = rows.find((r) => r.id === id);
+          if (row) {
+            row.travelDate = travelDate;
+            row.reschedules++;
+          }
+        },
+      },
+      // NUEVO (8.G)
+      destinations: {
+        findByIdForUpdate: async (id) => {
+          recorder.lockedDestinationIds.push(id);
+          return destinationsById.get(id) ?? null;
+        },
+        reservedPeopleOn: async (_date, ids) =>
+          new Map(ids.includes(TORTUGUERO.id) ? [[TORTUGUERO.id, reservedInTortuguero]] : []),
       },
       adminActions: {
         record: async (data) => {
@@ -501,5 +540,103 @@ describe('AdminReservationService.changePaymentStatus (CU-15 + N-1)', () => {
     await assertAppError(service.changePaymentStatus(99, ADMIN_ID, { status: 'Aprobado' }), 404, 'El pago no existe');
     await service.remove(2, ADMIN_ID, {});
     await assertAppError(service.changePaymentStatus(8, ADMIN_ID, { status: 'Aprobado' }), 404, 'El pago no existe');
+  });
+});
+
+// NUEVO (8.G)
+describe('adminRescheduleSchema (body de PATCH /admin/reservas/:id/fecha)', () => {
+  test('fecha y motivo → válidos; el motivo sin espacios a los lados', () => {
+    assert.deepEqual(adminRescheduleSchema.parse({ travelDate: '2026-12-12', reason: '  Derrumbe en la ruta ', x: 1 }), {
+      travelDate: '2026-12-12',
+      reason: 'Derrumbe en la ruta',
+    });
+  });
+
+  test('sin motivo, motivo vacío o fecha inválida (N-2a, V39) → error en ese campo', () => {
+    const cases: [unknown, string][] = [
+      [{ travelDate: '2026-12-12' }, 'reason'],
+      [{ travelDate: '2026-12-12', reason: '   ' }, 'reason'],
+      [{ travelDate: '2026-02-30', reason: 'Derrumbe' }, 'travelDate'],
+      [{ reason: 'Derrumbe' }, 'travelDate'],
+    ];
+    for (const [body, field] of cases) {
+      const result = adminRescheduleSchema.safeParse(body);
+      assert.equal(result.success, false);
+      assert.equal(result.error?.issues[0]?.path.join('.'), field);
+    }
+  });
+});
+
+describe('AdminReservationService.reschedule (N-2a)', () => {
+  const INPUT = { travelDate: '2026-12-12', reason: 'Derrumbe en la ruta' };
+
+  test('cabe justo (18 + 2 = 20) → fecha nueva, monto igual, +1 reagenda y en el historial con las dos fechas', async () => {
+    const { service, recorder } = buildService({ stored: [ANA], reservedInTortuguero: 18 });
+    const result = await service.reschedule(1, ADMIN_ID, INPUT, NOW);
+
+    assert.equal(result.travelDate, '2026-12-12');
+    assert.equal(result.status, 'Pendiente');
+    assert.equal(result.quote.total, '107350.00');
+    assert.equal(result.reschedules, 3);
+    assert.deepEqual(recorder.lockedIds, [1]);
+    assert.deepEqual(recorder.lockedDestinationIds, [4]);
+    assert.deepEqual(recorder.updatedDates, [{ id: 1, travelDate: '2026-12-12' }]);
+    assert.deepEqual(recorder.actions, [
+      { reservationId: 1, adminId: ADMIN_ID, action: 'reagendar', reason: 'Derrumbe en la ruta', previousDate: '2026-12-10', newDate: '2026-12-12' },
+    ]);
+  });
+
+  test('faltan 48 h o menos → SÍ se puede (N-2a: el admin no pasa por RN-02); una aprobada sigue aprobada (V40)', async () => {
+    const pedroApproved: AdminReservationDetails = { ...PEDRO, status: 'Aprobada' };
+    const { service } = buildService({ stored: [pedroApproved] });
+    const result = await service.reschedule(4, ADMIN_ID, INPUT, NOW);
+    assert.equal(result.travelDate, '2026-12-12');
+    assert.equal(result.status, 'Aprobada');
+  });
+
+  test('sin cupo en la fecha nueva (19 + 2 > 20, RN-01) → 409 con los cupos y no se guarda nada', async () => {
+    const { service, recorder } = buildService({ stored: [ANA], reservedInTortuguero: 19 });
+    await assertAppError(
+      service.reschedule(1, ADMIN_ID, INPUT, NOW),
+      409,
+      'No hay cupo suficiente para esa fecha. Cupos disponibles: 1',
+    );
+    assert.equal(recorder.updatedDates.length, 0);
+    assert.equal(recorder.actions.length, 0);
+  });
+
+  test('reserva cancelada (V40) → 409', async () => {
+    const { service, recorder } = buildService({ stored: [CARLA] });
+    await assertAppError(service.reschedule(2, ADMIN_ID, INPUT, NOW), 409, 'No se puede cambiar la fecha de una reserva cancelada');
+    assert.equal(recorder.updatedDates.length, 0);
+  });
+
+  test('la misma fecha que ya tiene (V41) → 400 travelDate', async () => {
+    const { service, recorder } = buildService({ stored: [ANA] });
+    await assert.rejects(service.reschedule(1, ADMIN_ID, { ...INPUT, travelDate: '2026-12-10' }, NOW), (e: unknown) => {
+      assert.ok(e instanceof AppError);
+      assert.equal(e.status, 400);
+      assert.equal(e.details?.[0]?.field, 'travelDate');
+      return true;
+    });
+    assert.equal(recorder.updatedDates.length, 0);
+  });
+
+  test('destino desactivado (V42) → 409 con el mensaje del turista', async () => {
+    const atIrazu: AdminReservationDetails = { ...ANA, destination: { id: 14, name: 'Volcán Irazú', place: 'Cartago' } };
+    const { service, recorder } = buildService({ stored: [atIrazu] });
+    await assertAppError(service.reschedule(1, ADMIN_ID, INPUT, NOW), 409, 'El destino ya no está disponible para cambiar la fecha');
+    assert.equal(recorder.updatedDates.length, 0);
+  });
+
+  test('fecha nueva de hoy en Costa Rica → 400 sin abrir la transacción', async () => {
+    const { service, recorder } = buildService({ stored: [ANA] });
+    await assert.rejects(service.reschedule(1, ADMIN_ID, { ...INPUT, travelDate: '2026-11-08' }, NOW), AppError);
+    assert.equal(recorder.transactions, 0);
+  });
+
+  test('inexistente (V20) → 404', async () => {
+    const { service } = buildService();
+    await assertAppError(service.reschedule(1, ADMIN_ID, INPUT, NOW), 404, 'La reserva no existe');
   });
 });

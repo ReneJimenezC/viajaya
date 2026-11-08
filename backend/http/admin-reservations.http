@@ -1,6 +1,8 @@
 ### Pruebas manuales de RF-08 y RF-09 (reservas y pagos del administrador, CU-11 a CU-15) con REST Client.
 ### Ejecútalas EN ORDEN: la 3 toma el id de la reserva que crea la 2, y de la 4 a la 11 usan ese id.
 ### Lo mismo con la 14 a la 25 (pagos): la 15 toma los ids de la reserva que crea la 14.
+### Y con la 26 a la 33 (reagenda del admin): la 27 toma el id de la reserva que crea la 26.
+### La 34 a la 37 prueban el N-3 (la 36 necesita el id escrito a mano).
 ### Primero ejecuta "login": cuando lo pida, escribe la contraseña de ADMIN_PASSWORD del .env, SIN las comillas.
 
 @baseUrl = http://127.0.0.1:3000
@@ -11,6 +13,8 @@
 # NUEVO (8.F): la reserva de la prueba 14 viaja en 402 días, así queda primera en la prueba 15
 @reserva2Id = {{lista2.response.body.$[0].id}}
 @pagoId = {{lista2.response.body.$[0].payment.id}}
+# NUEVO (8.G): la reserva de la prueba 26 viaja en 404 días, así queda primera en la prueba 27
+@reserva3Id = {{lista3.response.body.$[0].id}}
 
 # @name login
 # @prompt password
@@ -161,3 +165,82 @@ Content-Type: application/json
 ### la próxima vez que ejecutes el archivo.
 DELETE {{baseUrl}}/admin/reservas/{{reserva2Id}}
 Authorization: Bearer {{token}}
+
+### ===== Reagenda del admin (N-2a) y cancelación del turista después (N-3) =====
+
+### 26. Crear otra reserva de prueba para dentro de 404 días → 201
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 404 d}}", "people": 2, "customerName": "Prueba Reagenda", "customerEmail": "reagenda.prueba@correo.com", "cardNumber": "4111111111111112" }
+
+### 27. Listar → 200; la primera es "Prueba Reagenda"
+# @name lista3
+GET {{baseUrl}}/admin/reservas
+Authorization: Bearer {{token}}
+
+### 28. Reagendar sin motivo (N-2a, V39) → 400 con details en "reason"
+PATCH {{baseUrl}}/admin/reservas/{{reserva3Id}}/fecha
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "travelDate": "{{$localDatetime "YYYY-MM-DD" 405 d}}" }
+
+### 29. Reagendar a la misma fecha (V41) → 400 con details en "travelDate"
+PATCH {{baseUrl}}/admin/reservas/{{reserva3Id}}/fecha
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "travelDate": "{{$localDatetime "YYYY-MM-DD" 404 d}}", "reason": "Prueba" }
+
+### 30. Reagendar con motivo (N-2a) → 200 con la fecha nueva, el mismo total y "reschedules": 1
+PATCH {{baseUrl}}/admin/reservas/{{reserva3Id}}/fecha
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "travelDate": "{{$localDatetime "YYYY-MM-DD" 405 d}}", "reason": "Derrumbe en la ruta" }
+
+### 31. Cancelarla (limpieza) → 200
+POST {{baseUrl}}/admin/reservas/{{reserva3Id}}/cancelar
+Authorization: Bearer {{token}}
+
+### 32. Reagendar la cancelada (V40) → 409 "No se puede cambiar la fecha de una reserva cancelada"
+PATCH {{baseUrl}}/admin/reservas/{{reserva3Id}}/fecha
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "travelDate": "{{$localDatetime "YYYY-MM-DD" 406 d}}", "reason": "Prueba" }
+
+### 33. Eliminarla (limpieza: así no queda primera la próxima vez) → 204
+DELETE {{baseUrl}}/admin/reservas/{{reserva3Id}}
+Authorization: Bearer {{token}}
+
+### 34. N-3: crear una reserva para MAÑANA (como turista) → 201
+# @name n3
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 1 d}}", "people": 1, "customerName": "Prueba N3", "customerEmail": "n3.prueba@correo.com", "cardNumber": "4111111111111112" }
+
+### 35. El turista intenta cancelarla (faltan menos de 48 h, RN-02) → 422
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{n3.response.body.code}}", "customerEmail": "n3.prueba@correo.com" }
+
+### Cambia el 0 por el id de "Prueba N3". Para no confundirlo con otra reserva, sácalo con este comando:
+### docker compose -f C:\dev\viajaya\docker-compose.yml exec -T db sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -c ''SELECT id_reserva, nombre_cliente, fecha_viaje FROM reservas WHERE nombre_cliente = ''''Prueba N3'''' ORDER BY id_reserva DESC LIMIT 1'''
+PATCH {{baseUrl}}/admin/reservas/8/fecha
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "travelDate": "{{$localDatetime "YYYY-MM-DD" 2 d}}", "reason": "Derrumbe en la ruta" }
+
+### 37. Ahora el turista SÍ puede cancelar (N-3: la fecha la puso el admin) → 200 con "status": "Cancelada"
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{n3.response.body.code}}", "customerEmail": "n3.prueba@correo.com" }
+
+
+

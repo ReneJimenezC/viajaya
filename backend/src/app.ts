@@ -86,6 +86,8 @@ export function createApp(): express.Express {
       work({
         reservations: new ReservationRepository(manager),
         adminActions: new AdminActionRepository(manager),
+                // NUEVO (8.G): para bloquear el destino y validar RN-01 al reagendar
+        destinations: new DestinationRepository(manager),
       }),
     ),
   );

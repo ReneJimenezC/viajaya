@@ -5,16 +5,29 @@
 
 import { AppError } from '../errors/app-error';
 import type { AdminActionType } from '../models/admin-action.entity';
-import type { AdminActionInput, ChangePaymentStatusInput } from '../models/admin-reservation.schema';
+import type {
+  AdminActionInput,
+  AdminRescheduleInput,
+  ChangePaymentStatusInput,
+} from '../models/admin-reservation.schema';
 import type { PaymentStatus } from '../models/payment.entity';
 import type { AdminActionRepository } from '../repositories/admin-action.repository';
+import type { DestinationRepository } from '../repositories/destination.repository';
 import type {
   AdminReservationDetails,
   AdminReservationRef,
   ReservationRepository,
 } from '../repositories/reservation.repository';
-import { canChangeReservation } from './business-rules';
-import { buildReservationResult, CANCEL_WINDOW_MESSAGE, type ReservationResult } from './reservation.service';
+import { canChangeReservation, capacityConflict, hasCapacity, isFutureTravelDate } from './business-rules';
+import {
+  buildReservationResult,
+  CANCEL_WINDOW_MESSAGE,
+  RESCHEDULE_UNAVAILABLE_MESSAGE,
+  type ReservationResult,
+} from './reservation.service';
+
+
+
 
 // NUEVO (8.C-8.E): mensajes de las acciones del admin
 // V20: id inválido, inexistente o de una reserva eliminada (CU-12/13/14 2a)
@@ -38,6 +51,8 @@ const PAYMENT_RESERVATION_CANCELLED_MESSAGE = 'No se puede cambiar el pago de un
 const PAYMENT_SAME_STATUS_MESSAGE = 'El pago ya tiene ese estado';
 // V35 (coherente con V22): una reserva aprobada no puede quedar sin pago confirmado
 const PAYMENT_PENDING_APPROVED_MESSAGE = 'No se puede dejar pendiente el pago de una reserva aprobada';
+// NUEVO (8.G): V40, mover una cancelada la "reviviría"
+const RESCHEDULE_CANCELLED_MESSAGE = 'No se puede cambiar la fecha de una reserva cancelada';
 
 // NUEVO (8.F): acción del historial para cada estado nuevo del pago (V13)
 // Record<A, B> = un mapa fijo con una entrada por cada estado (como un EnumMap de Java)
@@ -62,8 +77,12 @@ export interface AdminReservationStores {
     // NUEVO (8.F)
     | 'findPaymentForUpdate'
     | 'updatePaymentStatus'
+        // NUEVO (8.G)
+    | 'updateTravelDate'
   >;
   adminActions: Pick<AdminActionRepository, 'record'>;
+    // NUEVO (8.G): el destino, para bloquearlo y validar RN-01 al reagendar (SAD 3.2)
+  destinations: Pick<DestinationRepository, 'findByIdForUpdate' | 'reservedPeopleOn'>;
 }
 
 // Igual que RunInTransaction del turista, pero entrega las piezas del admin.
@@ -228,6 +247,70 @@ export class AdminReservationService {
       }
       await recordAction(stores, payment.reservationId, adminId, PAYMENT_ACTIONS[input.status], input);
       return readResult(stores, payment.reservationId);
+    });
+  }
+  
+  // NUEVO (8.G) N-2a: el admin cambia la fecha SIN RN-02 (causa mayor), con motivo obligatorio
+  // (V39). Sigue validando la fecha futura y RN-01 dentro de una transacción con el destino
+  // bloqueado (SAD 3.2), como el cambio del turista. Monto igual; reschedules + 1 (V43); la
+  // reserva conserva su estado (V40). El historial guarda fecha anterior, nueva y motivo (V12).
+  // Ejemplo: (1, 3, { travelDate: '2026-12-12', reason: 'Derrumbe en la ruta' }, ahora)
+  //   → la reserva 1 pasa del 10/12 al 12/12; historial 'reagendar' 10/12 → 12/12
+  // async: así el 400 de la fecha también llega como promesa rechazada (igual que el del turista)
+  async reschedule(
+    id: number,
+    adminId: number,
+    input: AdminRescheduleInput,
+    now: Date = new Date(),
+  ): Promise<AdminReservationResult> {
+    const { travelDate: newDate, reason } = input;
+
+    // Fecha nueva posterior a hoy en Costa Rica, sin abrir la transacción (como el turista)
+    if (!isFutureTravelDate(newDate, now)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+        { field: 'travelDate', message: 'La fecha del viaje debe ser posterior a hoy' },
+      ]);
+    }
+
+    return this.runInTransaction(async (stores) => {
+      // Orden de candados: reserva → destino, el mismo del cambio del turista (sin ciclos)
+      const reservation = await lockReservation(stores, id);
+      if (reservation.status === 'Cancelada') {
+        throw new AppError(409, 'CONFLICT', RESCHEDULE_CANCELLED_MESSAGE);
+      }
+      // V41: la misma fecha no es un cambio
+      if (newDate === reservation.travelDate) {
+        throw new AppError(400, 'VALIDATION_ERROR', 'Los datos enviados no son válidos', [
+          { field: 'travelDate', message: 'La nueva fecha debe ser distinta de la actual' },
+        ]);
+      }
+      // N-2a: aquí NO se revisa RN-02 (es la excepción aprobada por el profesor)
+
+      // SAD 3.2: bloquea el destino (el mismo candado de las reservas nuevas); V42: desactivado → 409
+      const destination = await stores.destinations.findByIdForUpdate(reservation.destinationId);
+      if (!destination || !destination.active) {
+        throw new AppError(409, 'CONFLICT', RESCHEDULE_UNAVAILABLE_MESSAGE);
+      }
+
+      // RN-01 en la fecha NUEVA (la reserva aún está en la vieja: no se cuenta dos veces)
+      const reserved = await stores.destinations.reservedPeopleOn(newDate, [destination.id]);
+      const reservedPeople = reserved.get(destination.id) ?? 0;
+      if (!hasCapacity({ dailyCapacity: destination.dailyCapacity, reservedPeople, requestedPeople: reservation.people })) {
+        throw capacityConflict(Math.max(destination.dailyCapacity - reservedPeople, 0));
+      }
+
+      // V43: la misma actualización del turista (fecha + reagendas + 1; el monto no cambia)
+      await stores.reservations.updateTravelDate(id, newDate);
+      // V12: el historial guarda de qué fecha a qué fecha y por qué
+      await stores.adminActions.record({
+        reservationId: id,
+        adminId,
+        action: 'reagendar',
+        reason,
+        previousDate: reservation.travelDate,
+        newDate,
+      });
+      return readResult(stores, id);
     });
   }
 }

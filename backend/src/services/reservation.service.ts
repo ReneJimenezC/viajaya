@@ -43,7 +43,8 @@ const LOOKUP_NOT_FOUND_MESSAGE = 'No se encontró una reserva activa que coincid
 const RESCHEDULE_WINDOW_MESSAGE =
   'La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje';
 // V2: el destino fue desactivado después de reservar (sección 7: "mover fecha bloqueado")
-const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
+// CAMBIO (8.G): exportado; la reagenda del admin usa el mismo mensaje (V42)
+export const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
 // NUEVO (6.F): CU-06 2a (RN-02): 422 BUSINESS_RULE, como pide el SAD 4
 // CAMBIO (8.D): exportado; el admin también respeta RN-02 al cancelar (8.2b = no)
 export const CANCEL_WINDOW_MESSAGE =
@@ -70,7 +71,8 @@ export interface ReservationStores {
   reservations: Pick<
     ReservationRepository,
     'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'    // NUEVO (6.F): cancelReservation para la cancelación
-    | 'cancelReservation'
+    | 'cancelReservation'    // NUEVO (8.G, N-3)
+    | 'wasRescheduledByAdminTo'
   >;
 }
 
@@ -325,8 +327,13 @@ export class ReservationService {
         throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
       }
 
-      // CU-06 paso 2 / 2a (RN-02): deben faltar MÁS de 48 h para la fecha del viaje
-      if (!canChangeReservation(reservation.travelDate, now)) {
+            // CU-06 paso 2 / 2a (RN-02): deben faltar MÁS de 48 h para la fecha del viaje.
+      // CAMBIO (8.G, N-3 y V45): excepción si la fecha actual la puso el admin (causa mayor): el
+      // turista puede cancelar aunque falten 48 h o menos. El historial solo se consulta en ese caso.
+      if (
+        !canChangeReservation(reservation.travelDate, now) &&
+        !(await reservations.wasRescheduledByAdminTo(reservation.id, reservation.travelDate))
+      ) {
         throw new AppError(422, 'BUSINESS_RULE', CANCEL_WINDOW_MESSAGE);
       }
 

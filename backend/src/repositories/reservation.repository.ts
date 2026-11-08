@@ -77,12 +77,16 @@ export interface AdminReservationDetails extends ReservationDetails {
 
 // NUEVO (8.C-8.E): lo mínimo de una reserva para que el admin la apruebe, cancele o elimine:
 // su estado, su fecha (RN-02 al cancelar) y el estado de su pago más reciente (V22).
-// Ejemplo: { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado' }
+// CAMBIO (8.G): también su destino y sus personas, para validar RN-01 al reagendar.
+// Ejemplo: { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado',
+//            destinationId: 4, people: 2 }
 export interface AdminReservationRef {
   id: number;
   status: ReservationStatus;
   travelDate: string;
   paymentStatus: PaymentStatus;
+  destinationId: number;
+  people: number;
 }
 
 // NUEVO (8.F): lo mínimo de un pago para que el admin cambie su estado (CU-15): el pago, su
@@ -276,9 +280,18 @@ export class ReservationRepository {
   // Devuelve null si no existe o está eliminada (V20).
   // Ejemplo: (1) → { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado' }
   async findByIdForUpdate(id: number): Promise<AdminReservationRef | null> {
-    const rows: { id_reserva: number; estado: ReservationStatus; fecha_viaje: string; pago_estado: PaymentStatus }[] =
+    // CAMBIO (8.G): se agregan id_destino y cantidad_personas
+    const rows: {
+      id_reserva: number;
+      estado: ReservationStatus;
+      fecha_viaje: string;
+      pago_estado: PaymentStatus;
+      id_destino: number;
+      cantidad_personas: number;
+    }[] =
       await this.manager.query(
-        `SELECT r.id_reserva, r.estado, r.fecha_viaje::text AS fecha_viaje, p.estado AS pago_estado
+        `SELECT r.id_reserva, r.estado, r.fecha_viaje::text AS fecha_viaje, p.estado AS pago_estado,
+                r.id_destino, r.cantidad_personas
            FROM reservas r
            JOIN LATERAL (
                 SELECT estado
@@ -294,7 +307,14 @@ export class ReservationRepository {
       );
     const row = rows[0];
     return row
-      ? { id: row.id_reserva, status: row.estado, travelDate: row.fecha_viaje, paymentStatus: row.pago_estado }
+      ? {
+          id: row.id_reserva,
+          status: row.estado,
+          travelDate: row.fecha_viaje,
+          paymentStatus: row.pago_estado,
+          destinationId: row.id_destino,
+          people: row.cantidad_personas,
+        }
       : null;
   }
 
@@ -367,5 +387,22 @@ export class ReservationRepository {
   // Ejemplo: (7, 'Rechazado') → el pago 7 queda 'Rechazado'
   async updatePaymentStatus(paymentId: number, status: PaymentStatus): Promise<void> {
     await this.manager.query('UPDATE pagos SET estado = $2 WHERE id_pago = $1', [paymentId, status]);
+  }
+
+  // NUEVO (8.G, N-3 y V45): ¿la fecha ACTUAL de la reserva la puso el admin? Es así si la última
+  // reagenda del admin (historial) dejó justo esa fecha. Si después el turista la movió a otra
+  // fecha suya, ya no coincide y RN-02 vuelve a aplicar.
+  // Ejemplo: admin movió del 10/11 al 11/11 → (1, '2026-11-11') → true; (1, '2026-11-20') → false
+  async wasRescheduledByAdminTo(reservationId: number, travelDate: string): Promise<boolean> {
+    const rows: { coincide: boolean }[] = await this.manager.query(
+      `SELECT fecha_nueva = $2::date AS coincide
+         FROM acciones_admin
+        WHERE id_reserva = $1
+          AND accion = 'reagendar'
+        ORDER BY id_accion DESC
+        LIMIT 1`,
+      [reservationId, travelDate],
+    );
+    return rows[0]?.coincide === true;
   }
 }

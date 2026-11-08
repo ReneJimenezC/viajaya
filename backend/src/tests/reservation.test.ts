@@ -64,10 +64,17 @@ interface Recorder {
 // - codes: códigos que irá entregando el generador, en orden
 // - stored: NUEVO (6.D) reservas activas que la consulta falsa "encuentra" (por código + correo).
 //   En 6.E se copian (para que una prueba no cambie las de otra) y su id es su posición + 1.
+// - adminDates: NUEVO (8.G, N-3) por id de reserva, la fecha que dejó la última reagenda del admin
 function buildService(
-  options: { reservedInTortuguero?: number; takenCodes?: string[]; codes?: string[]; stored?: ReservationDetails[] } = {},
+  options: {
+    reservedInTortuguero?: number;
+    takenCodes?: string[];
+    codes?: string[];
+    stored?: ReservationDetails[];
+    adminDates?: Record<number, string>;
+  } = {},
 ) {
-  const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [] } = options;
+  const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [], adminDates = {} } = options;
   const recorder: Recorder = {
     transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [], updatedDates: [], cancelledIds: [],
   };
@@ -115,6 +122,8 @@ function buildService(
           const row = rows[id - 1];
           if (row) row.status = 'Cancelada';
         },
+        // NUEVO (8.G, N-3): ¿la última reagenda del admin dejó justo esta fecha?
+        wasRescheduledByAdminTo: async (id: number, travelDate: string) => adminDates[id] === travelDate,
         // NUEVO (6.E): anota el cambio y lo aplica a la copia
         updateTravelDate: async (id: number, travelDate: string) => {
           recorder.updatedDates.push({ id, travelDate });
@@ -521,6 +530,27 @@ describe('ReservationService.cancel (CU-06)', () => {
     await service.cancel(CANCEL, NOW);
     await rejectsWith(service.cancel(CANCEL, NOW), 404);
     assert.deepEqual(recorder.cancelledIds, [1]);
+  });
+
+  // NUEVO (8.G, N-3 y V45)
+  test('faltan 48 h o menos pero la fecha la puso el admin (N-3) → SÍ se puede cancelar', async () => {
+    const { service, recorder } = buildService({
+      stored: [{ ...STORED, travelDate: '2026-11-05' }],
+      adminDates: { 1: '2026-11-05' },
+    });
+    const { reservation } = await service.cancel(CANCEL, NOW);
+    assert.equal(reservation.status, 'Cancelada');
+    assert.deepEqual(recorder.cancelledIds, [1]);
+  });
+
+  test('faltan 48 h o menos y la fecha la eligió el turista después de la reagenda del admin (V45) → 422', async () => {
+    // El admin la había movido al 04/11, pero luego el turista la movió al 05/11
+    const { service, recorder } = buildService({
+      stored: [{ ...STORED, travelDate: '2026-11-05' }],
+      adminDates: { 1: '2026-11-04' },
+    });
+    await rejectsWith(service.cancel(CANCEL, NOW), 422);
+    assert.deepEqual(recorder.cancelledIds, []);
   });
 
   test('destino desactivado después de reservar → sí se puede cancelar (sección 7)', async () => {

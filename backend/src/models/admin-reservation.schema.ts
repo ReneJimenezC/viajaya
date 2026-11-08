@@ -2,7 +2,9 @@
 
 import { z } from 'zod';
 import { ADMIN_REASON_MAX_LENGTH } from './admin-action.entity';
+import { travelDateField } from './destination.schema';
 import { PAYMENT_STATES } from './payment.entity';
+
 
 // Motivo de una acción del admin (V10): sin espacios a los lados, de 1 a 500 caracteres.
 // Se exporta porque el cambio de pago (8.F) y la reagenda (8.G) lo usarán como OBLIGATORIO.
@@ -51,3 +53,18 @@ export const changePaymentStatusSchema = z
 
 // Tipo que sale de la plantilla: { status: 'Pendiente' | 'Aprobado' | 'Rechazado'; reason?: string }
 export type ChangePaymentStatusInput = z.infer<typeof changePaymentStatusSchema>;
+
+
+// NUEVO (8.G): body de PATCH /admin/reservas/:id/fecha (N-2a, V39). Los dos campos son
+// OBLIGATORIOS: la fecha nueva (la misma regla de formato del turista) y el motivo (causa mayor).
+// Ejemplo válido: { "travelDate": "2026-12-12", "reason": "Derrumbe en la ruta" }
+export const adminRescheduleSchema = z.object(
+  {
+    travelDate: travelDateField,
+    reason: reasonField,
+  },
+  { error: 'El cuerpo de la petición debe ser un objeto JSON' },
+);
+
+// Tipo que sale de la plantilla: { travelDate: string; reason: string }
+export type AdminRescheduleInput = z.infer<typeof adminRescheduleSchema>;
