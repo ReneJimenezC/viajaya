@@ -71,9 +71,9 @@ export interface ActiveReservationRef {
 export interface AdminReservationDetails extends ReservationDetails {
   id: number;
   reschedules: number;
+  // NUEVO (8.F, V29): id del pago más reciente, para PATCH /admin/pagos/:id (el turista no lo ve)
+  paymentId: number;
 }
-
-
 
 // NUEVO (8.C-8.E): lo mínimo de una reserva para que el admin la apruebe, cancele o elimine:
 // su estado, su fecha (RN-02 al cancelar) y el estado de su pago más reciente (V22).
@@ -85,8 +85,20 @@ export interface AdminReservationRef {
   paymentStatus: PaymentStatus;
 }
 
+// NUEVO (8.F): lo mínimo de un pago para que el admin cambie su estado (CU-15): el pago, su
+// reserva y si es el más reciente de ella (V32).
+// Ejemplo: { paymentId: 7, paymentStatus: 'Aprobado', reservationId: 1, reservationStatus: 'Pendiente', isLatest: true }
+export interface AdminPaymentRef {
+  paymentId: number;
+  paymentStatus: PaymentStatus;
+  reservationId: number;
+  reservationStatus: ReservationStatus;
+  isLatest: boolean;
+}
+
 // NUEVO (6.D): forma de cada fila que devuelve DETAILS_SELECT
 // CAMBIO (8.B): también la usa findAllForAdmin; se agregan id_reserva y reagendas
+// CAMBIO (8.F): se agrega id_pago (V29)
 interface ReservationDetailsRow {
   id_reserva: number;
   codigo: string;
@@ -102,6 +114,7 @@ interface ReservationDetailsRow {
   subtotal: string;
   iva: string;
   monto_total: string;
+  id_pago: number;
   pago_estado: PaymentStatus;
   tarjeta_ultimo_digito: number;
   reagendas: number;
@@ -118,11 +131,11 @@ const DETAILS_SELECT = `
   SELECT r.id_reserva, r.codigo, r.estado, r.id_destino, d.nombre AS destino_nombre,
          d.lugar AS destino_lugar, r.fecha_viaje::text AS fecha_viaje, r.nombre_cliente,
          r.email_cliente, r.cantidad_personas, r.precio_base, r.subtotal, r.iva, r.monto_total,
-         p.estado AS pago_estado, p.tarjeta_ultimo_digito, r.reagendas, r.creado_en
+         p.id_pago, p.estado AS pago_estado, p.tarjeta_ultimo_digito, r.reagendas, r.creado_en
     FROM reservas r
     JOIN destinos d ON d.id_destino = r.id_destino
     JOIN LATERAL (
-         SELECT estado, tarjeta_ultimo_digito
+         SELECT id_pago, estado, tarjeta_ultimo_digito
            FROM pagos
           WHERE id_reserva = r.id_reserva
           ORDER BY fecha DESC, id_pago DESC
@@ -147,6 +160,7 @@ function toDetails(row: ReservationDetailsRow): AdminReservationDetails {
     iva: row.iva,
     total: row.monto_total,
     payment: { status: row.pago_estado, cardLastDigit: row.tarjeta_ultimo_digito },
+    paymentId: row.id_pago,
     reschedules: row.reagendas,
     createdAt: row.creado_en,
   };
@@ -256,8 +270,6 @@ export class ReservationRepository {
     await this.manager.query("UPDATE reservas SET estado = 'Cancelada' WHERE id_reserva = $1", [id]);
   }
 
-
-  
   // NUEVO (8.C-8.E): busca la reserva por su id (no eliminada) y BLOQUEA su fila hasta el fin de
   // la transacción (V27): con un doble clic del admin, la segunda petición espera a la primera.
   // "FOR UPDATE OF r" bloquea solo la fila de reservas (no la del pago que se lee al lado).
@@ -311,5 +323,49 @@ export class ReservationRepository {
   // Ejemplo: (1) → la reserva 1 queda con eliminado_en = ahora
   async markDeleted(id: number): Promise<void> {
     await this.manager.query('UPDATE reservas SET eliminado_en = now() WHERE id_reserva = $1', [id]);
+  }
+
+  // NUEVO (8.F): busca el pago (de una reserva no eliminada) y BLOQUEA la fila de su RESERVA hasta
+  // el fin de la transacción: el mismo candado que aprobar, cancelar y eliminar, así un cambio de
+  // pago y una cancelación de esa reserva nunca pasan a la vez. Dice además si es el pago más
+  // reciente de la reserva (V32). Devuelve null si no existe o su reserva está eliminada.
+  // Ejemplo: (7) → { paymentId: 7, paymentStatus: 'Aprobado', reservationId: 1, reservationStatus: 'Pendiente', isLatest: true }
+  async findPaymentForUpdate(paymentId: number): Promise<AdminPaymentRef | null> {
+    const rows: {
+      id_pago: number;
+      pago_estado: PaymentStatus;
+      id_reserva: number;
+      reserva_estado: ReservationStatus;
+      es_ultimo: boolean;
+    }[] = await this.manager.query(
+      `SELECT pg.id_pago, pg.estado AS pago_estado, r.id_reserva, r.estado AS reserva_estado,
+              pg.id_pago = (SELECT id_pago
+                              FROM pagos
+                             WHERE id_reserva = r.id_reserva
+                             ORDER BY fecha DESC, id_pago DESC
+                             LIMIT 1) AS es_ultimo
+         FROM pagos pg
+         JOIN reservas r ON r.id_reserva = pg.id_reserva
+        WHERE pg.id_pago = $1
+          AND r.eliminado_en IS NULL
+        FOR UPDATE OF r`,
+      [paymentId],
+    );
+    const row = rows[0];
+    return row
+      ? {
+          paymentId: row.id_pago,
+          paymentStatus: row.pago_estado,
+          reservationId: row.id_reserva,
+          reservationStatus: row.reserva_estado,
+          isLatest: row.es_ultimo,
+        }
+      : null;
+  }
+
+  // NUEVO (8.F): cambia el estado de un pago (CU-15 paso 8). El monto y el dígito no se tocan.
+  // Ejemplo: (7, 'Rechazado') → el pago 7 queda 'Rechazado'
+  async updatePaymentStatus(paymentId: number, status: PaymentStatus): Promise<void> {
+    await this.manager.query('UPDATE pagos SET estado = $2 WHERE id_pago = $1', [paymentId, status]);
   }
 }

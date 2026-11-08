@@ -1,5 +1,6 @@
-### Pruebas manuales de RF-08 (reservas del administrador, CU-11 a CU-14) con REST Client.
+### Pruebas manuales de RF-08 y RF-09 (reservas y pagos del administrador, CU-11 a CU-15) con REST Client.
 ### Ejecútalas EN ORDEN: la 3 toma el id de la reserva que crea la 2, y de la 4 a la 11 usan ese id.
+### Lo mismo con la 14 a la 25 (pagos): la 15 toma los ids de la reserva que crea la 14.
 ### Primero ejecuta "login": cuando lo pida, escribe la contraseña de ADMIN_PASSWORD del .env, SIN las comillas.
 
 @baseUrl = http://127.0.0.1:3000
@@ -7,6 +8,9 @@
 # La reserva de la prueba 2 viaja en 400 días: como el listado va de la fecha más lejana a la
 # más cercana (V16), siempre queda PRIMERA. $[0].id = el id del primer elemento de la lista.
 @reservaId = {{lista.response.body.$[0].id}}
+# NUEVO (8.F): la reserva de la prueba 14 viaja en 402 días, así queda primera en la prueba 15
+@reserva2Id = {{lista2.response.body.$[0].id}}
+@pagoId = {{lista2.response.body.$[0].payment.id}}
 
 # @name login
 # @prompt password
@@ -77,5 +81,83 @@ Authorization: Bearer {{token}}
 ### 13. Cancelar con 48 h o menos (RN-02, 8.2b = no) → 422
 ### Cambia el 0 por el id de una reserva Pendiente que viaje MAÑANA: la crea la prueba 16 de
 ### reservations.http ("Viaje Pronto"); búscala en la respuesta de la prueba 3 (vuelve a ejecutarla).
-POST {{baseUrl}}/admin/reservas/2/cancelar
+POST {{baseUrl}}/admin/reservas/0/cancelar
+Authorization: Bearer {{token}}
+
+### ===== Pagos (RF-09, CU-15 + N-1) =====
+
+### 14. Crear otra reserva de prueba para dentro de 402 días → 201
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 402 d}}", "people": 2, "customerName": "Prueba Pago", "customerEmail": "pago.prueba@correo.com", "cardNumber": "4111111111111112" }
+
+### 15. Listar → 200; la primera es "Prueba Pago" y su "payment" trae "id" (V29)
+# @name lista2
+GET {{baseUrl}}/admin/reservas
+Authorization: Bearer {{token}}
+
+### 16. Estado inválido (CU-15 6a) → 400 con details en "status"
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "aprobado" }
+
+### 17. El mismo estado que ya tiene (V34) → 409 "El pago ya tiene ese estado"
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Aprobado" }
+
+### 18. Pasar el pago a Pendiente → 200; la reserva sigue Pendiente
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Pendiente" }
+
+### 19. Aprobar la reserva con el pago Pendiente (V22) → 409 "El pago de la reserva no está aprobado"
+POST {{baseUrl}}/admin/reservas/{{reserva2Id}}/aprobar
+Authorization: Bearer {{token}}
+
+### 20. Volver el pago a Aprobado → 200
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Aprobado" }
+
+### 21. Rechazar sin motivo (N-1, V31) → 400 con details en "reason"
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Rechazado" }
+
+### 22. Rechazar con motivo (N-1) → 200: pago "Rechazado" y reserva "Cancelada"
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Rechazado", "reason": "La transferencia no llegó" }
+
+### 23. Intentar volver a Aprobado (V33: un rechazo no se deshace) → 409
+PATCH {{baseUrl}}/admin/pagos/{{pagoId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Aprobado" }
+
+### 24. Pago con id imposible (CU-15 2a) → 404 "El pago no existe"
+PATCH {{baseUrl}}/admin/pagos/abc
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "Aprobado" }
+
+### 25. Eliminar la reserva de prueba (ya cancelada) → 204. Así no queda primera en el listado
+### la próxima vez que ejecutes el archivo.
+DELETE {{baseUrl}}/admin/reservas/{{reserva2Id}}
 Authorization: Bearer {{token}}

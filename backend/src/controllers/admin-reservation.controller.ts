@@ -2,12 +2,14 @@
 // requireAdmin (y las acciones por validate), así que req.admin existe y el body está limpio.
 
 import type { Request, Response } from 'express';
-import type { AdminActionInput } from '../models/admin-reservation.schema';
+import type { AdminActionInput, ChangePaymentStatusInput } from '../models/admin-reservation.schema';
 import type { AdminReservationService } from '../services/admin-reservation.service';
 import { parseId } from './parse-id';
 
 // V20: el mismo mensaje del servicio para un :id imposible ("abc", "0") o inexistente
 const NOT_FOUND_MESSAGE = 'La reserva no existe';
+// NUEVO (8.F): CU-15 2a, para un :id de pago imposible o inexistente
+const PAYMENT_NOT_FOUND_MESSAGE = 'El pago no existe';
 
 // Id del admin que hace la petición (lo dejó requireAdmin en req.admin). Si no está, la ruta
 // se armó sin requireAdmin: es un error de programación → 500, nunca un acceso sin permiso.
@@ -62,5 +64,23 @@ export class AdminReservationController {
     await this.adminReservationService.remove(reservationId, adminId, req.body);
     req.log.info({ event: 'reservation_deleted', reservationId, adminId }, 'Reserva eliminada');
     res.status(204).end();
+  };
+
+  
+  // NUEVO (8.F) PATCH /admin/pagos/:id (CU-15 + N-1). 200 con la reserva (V37): si el pago se
+  // rechazó, ahí se ve también la reserva cancelada.
+  changePaymentStatus = async (
+    req: Request<{ id: string }, unknown, ChangePaymentStatusInput>,
+    res: Response,
+  ): Promise<void> => {
+    const adminId = adminIdOf(req);
+    const paymentId = parseId(req.params.id, PAYMENT_NOT_FOUND_MESSAGE);
+    const reservation = await this.adminReservationService.changePaymentStatus(paymentId, adminId, req.body);
+    // Auditoría (SAD 4: "cambios de pago", V38): ids y el estado nuevo; sin tarjeta, código ni correo
+    req.log.info(
+      { event: 'payment_status_changed', paymentId, reservationId: reservation.id, adminId, status: req.body.status },
+      'Estado del pago cambiado',
+    );
+    res.json(reservation);
   };
 }

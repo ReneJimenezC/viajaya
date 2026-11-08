@@ -5,7 +5,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError } from '../errors/app-error';
-import { adminActionSchema } from '../models/admin-reservation.schema';
+import { adminActionSchema, changePaymentStatusSchema } from '../models/admin-reservation.schema';
+import type { PaymentStatus } from '../models/payment.entity';
 import type { NewAdminAction } from '../repositories/admin-action.repository';
 import type { AdminReservationDetails } from '../repositories/reservation.repository';
 import { AdminReservationService, type AdminRunInTransaction } from '../services/admin-reservation.service';
@@ -31,6 +32,8 @@ const ANA: AdminReservationDetails = {
   iva: '12350.00',
   total: '107350.00',
   payment: { status: 'Aprobado', cardLastDigit: 2 },
+  // NUEVO (8.F, V29): id del pago más reciente
+  paymentId: 7,
   reschedules: 2,
   createdAt: CREATED_AT,
 };
@@ -43,17 +46,20 @@ const CARLA: AdminReservationDetails = {
   travelDate: '2026-12-08',
   customerName: 'Carla Rojas',
   customerEmail: 'carla@correo.com',
+  paymentId: 8,
   reschedules: 0,
 };
 // NUEVO (8.C-8.E): Luis ya aprobada; Pedro viaja en 36 h (RN-02); Marta con el pago pendiente
-const LUIS: AdminReservationDetails = { ...ANA, id: 3, code: 'VY-LUIS2345', status: 'Aprobada', customerName: 'Luis Pérez' };
-const PEDRO: AdminReservationDetails = { ...ANA, id: 4, code: 'VY-PEDR2345', travelDate: '2026-11-10', customerName: 'Pedro Solís' };
+// CAMBIO (8.F): cada una con su propio pago (paymentId)
+const LUIS: AdminReservationDetails = { ...ANA, id: 3, code: 'VY-LUIS2345', status: 'Aprobada', customerName: 'Luis Pérez', paymentId: 9 };
+const PEDRO: AdminReservationDetails = { ...ANA, id: 4, code: 'VY-PEDR2345', travelDate: '2026-11-10', customerName: 'Pedro Solís', paymentId: 10 };
 const MARTA: AdminReservationDetails = {
   ...ANA,
   id: 5,
   code: 'VY-MART2345',
   customerName: 'Marta Vega',
   payment: { status: 'Pendiente', cardLastDigit: 2 },
+  paymentId: 11,
 };
 
 // Lo que el servicio hizo con la "base" falsa
@@ -65,15 +71,20 @@ interface Recorder {
   cancelledIds: number[];
   deletedIds: number[];
   actions: NewAdminAction[];
+  // NUEVO (8.F): pagos cambiados por updatePaymentStatus
+  paymentUpdates: { paymentId: number; status: PaymentStatus }[];
 }
 
 // Arma un AdminReservationService con piezas falsas.
 // - stored: reservas guardadas, ya en el orden de la base (V16). Se COPIAN: así una prueba no
 //   cambia los datos de otra. Las "eliminadas" (markDeleted) dejan de aparecer, como en la base.
-function buildService(options: { stored?: AdminReservationDetails[] } = {}) {
-  const { stored = [] } = options;
+// - oldPayments: NUEVO (8.F) intentos de pago ANTERIORES de una reserva (no son el más reciente, V32)
+function buildService(
+  options: { stored?: AdminReservationDetails[]; oldPayments?: { paymentId: number; reservationId: number }[] } = {},
+) {
+  const { stored = [], oldPayments = [] } = options;
   const recorder: Recorder = {
-    transactions: 0, lockedIds: [], approvedIds: [], cancelledIds: [], deletedIds: [], actions: [],
+    transactions: 0, lockedIds: [], approvedIds: [], cancelledIds: [], deletedIds: [], actions: [], paymentUpdates: [],
   };
   const rows = stored.map((r) => ({ ...r, payment: { ...r.payment } }));
   const deleted = new Set<number>();
@@ -112,6 +123,27 @@ function buildService(options: { stored?: AdminReservationDetails[] } = {}) {
           recorder.deletedIds.push(id);
           deleted.add(id);
         },
+        // NUEVO (8.F): el pago más reciente está en la reserva (paymentId); los anteriores, aparte
+        findPaymentForUpdate: async (paymentId) => {
+          const latest = visible().find((r) => r.paymentId === paymentId);
+          if (latest) {
+            recorder.lockedIds.push(latest.id);
+            return {
+              paymentId, paymentStatus: latest.payment.status,
+              reservationId: latest.id, reservationStatus: latest.status, isLatest: true,
+            };
+          }
+          const old = oldPayments.find((p) => p.paymentId === paymentId);
+          const owner = old ? byId(old.reservationId) : undefined;
+          return old && owner
+            ? { paymentId, paymentStatus: 'Rechazado', reservationId: owner.id, reservationStatus: owner.status, isLatest: false }
+            : null;
+        },
+        updatePaymentStatus: async (paymentId, status) => {
+          recorder.paymentUpdates.push({ paymentId, status });
+          const row = rows.find((r) => r.paymentId === paymentId);
+          if (row) row.payment.status = status;
+        },
       },
       adminActions: {
         record: async (data) => {
@@ -148,7 +180,8 @@ describe('AdminReservationService.list (CU-11)', () => {
       customerName: 'Ana Mora',
       customerEmail: 'ana@correo.com',
       quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva: '12350.00', total: '107350.00' },
-      payment: { status: 'Aprobado', cardLastDigit: 2 },
+      // CAMBIO (8.F, V29): el pago del admin lleva su id
+      payment: { id: 7, status: 'Aprobado', cardLastDigit: 2 },
       createdAt: CREATED_AT,
       reschedules: 2,
     });
@@ -180,6 +213,8 @@ describe('AdminReservationService.list (CU-11)', () => {
       'id', 'code', 'status', 'destination', 'travelDate', 'customerName', 'customerEmail',
       'quote', 'payment', 'createdAt', 'reschedules',
     ]);
+    // NUEVO (8.F, V29): el id del pago va primero dentro de "payment"; paymentId no sale suelto
+    assert.deepEqual(Object.keys(row?.payment ?? {}), ['id', 'status', 'cardLastDigit']);
   });
 
   test('sin reservas (CU-11 4a) → lista vacía, no un error (V18)', async () => {
@@ -270,7 +305,8 @@ describe('AdminReservationService.cancel (CU-13)', () => {
     const result = await service.cancel(1, ADMIN_ID, { reason: 'Pedido del cliente' }, NOW);
 
     assert.equal(result.status, 'Cancelada');
-    assert.deepEqual(result.payment, { status: 'Aprobado', cardLastDigit: 2 });
+    // CAMBIO (8.F, V29): el pago del admin ahora trae su id
+    assert.deepEqual(result.payment, { id: 7, status: 'Aprobado', cardLastDigit: 2 });
     assert.deepEqual(recorder.lockedIds, [1]);
     assert.deepEqual(recorder.cancelledIds, [1]);
     assert.deepEqual(recorder.actions, [
@@ -339,5 +375,131 @@ describe('AdminReservationService.remove (CU-14)', () => {
   test('inexistente (CU-14 2a, V20) → 404', async () => {
     const { service } = buildService();
     await assertAppError(service.remove(7, ADMIN_ID, {}), 404, 'La reserva no existe');
+  });
+});
+
+// NUEVO (8.F)
+describe('changePaymentStatusSchema (body de PATCH /admin/pagos/:id)', () => {
+  test('los 3 estados de CU-15; el motivo sin espacios a los lados y los campos extra fuera', () => {
+    assert.deepEqual(changePaymentStatusSchema.parse({ status: 'Aprobado' }), { status: 'Aprobado' });
+    assert.deepEqual(changePaymentStatusSchema.parse({ status: 'Pendiente', extra: 1 }), { status: 'Pendiente' });
+    assert.deepEqual(changePaymentStatusSchema.parse({ status: 'Rechazado', reason: '  No llegó el pago ' }), {
+      status: 'Rechazado',
+      reason: 'No llegó el pago',
+    });
+  });
+
+  test('estado inválido, en minúsculas o faltante (CU-15 6a) → error en status', () => {
+    for (const body of [{ status: 'aprobado' }, { status: 'Reembolsado' }, { status: 1 }, {}]) {
+      const result = changePaymentStatusSchema.safeParse(body);
+      assert.equal(result.success, false);
+      assert.equal(result.error?.issues[0]?.path.join('.'), 'status');
+    }
+  });
+
+  test('rechazar sin motivo o con motivo vacío (N-1, V31) → error en reason', () => {
+    for (const body of [{ status: 'Rechazado' }, { status: 'Rechazado', reason: '   ' }]) {
+      const result = changePaymentStatusSchema.safeParse(body);
+      assert.equal(result.success, false);
+      assert.equal(result.error?.issues[0]?.path.join('.'), 'reason');
+    }
+  });
+});
+
+describe('AdminReservationService.changePaymentStatus (CU-15 + N-1)', () => {
+  test('Rechazado con motivo → pago Rechazado y reserva Cancelada, en el historial con su motivo', async () => {
+    const { service, recorder } = buildService({ stored: [ANA] });
+    const result = await service.changePaymentStatus(7, ADMIN_ID, { status: 'Rechazado', reason: 'No llegó el pago' });
+
+    assert.equal(result.status, 'Cancelada');
+    assert.deepEqual(result.payment, { id: 7, status: 'Rechazado', cardLastDigit: 2 });
+    assert.deepEqual(recorder.lockedIds, [1]);
+    assert.deepEqual(recorder.paymentUpdates, [{ paymentId: 7, status: 'Rechazado' }]);
+    assert.deepEqual(recorder.cancelledIds, [1]);
+    assert.deepEqual(recorder.actions, [
+      { reservationId: 1, adminId: ADMIN_ID, action: 'pago_rechazado', reason: 'No llegó el pago', previousDate: null, newDate: null },
+    ]);
+  });
+
+  test('Rechazado cancela aunque la reserva esté Aprobada o falten 48 h o menos (8.1 = A, V36)', async () => {
+    for (const reservation of [LUIS, PEDRO]) {
+      const { service, recorder } = buildService({ stored: [reservation] });
+      const result = await service.changePaymentStatus(reservation.paymentId, ADMIN_ID, {
+        status: 'Rechazado',
+        reason: 'No llegó el pago',
+      });
+      assert.equal(result.status, 'Cancelada');
+      assert.deepEqual(recorder.cancelledIds, [reservation.id]);
+    }
+  });
+
+  test('Aprobado → Pendiente con la reserva Pendiente → solo cambia el pago (no cancela)', async () => {
+    const { service, recorder } = buildService({ stored: [ANA] });
+    const result = await service.changePaymentStatus(7, ADMIN_ID, { status: 'Pendiente' });
+
+    assert.equal(result.status, 'Pendiente');
+    assert.equal(result.payment.status, 'Pendiente');
+    assert.equal(recorder.cancelledIds.length, 0);
+    assert.equal(recorder.actions[0]?.action, 'pago_pendiente');
+    assert.equal(recorder.actions[0]?.reason, null);
+  });
+
+  test('Pendiente → Aprobado → 200 y en el historial pago_aprobado', async () => {
+    const { service, recorder } = buildService({ stored: [MARTA] });
+    const result = await service.changePaymentStatus(11, ADMIN_ID, { status: 'Aprobado' });
+
+    assert.equal(result.payment.status, 'Aprobado');
+    assert.equal(recorder.actions[0]?.action, 'pago_aprobado');
+  });
+
+  test('el mismo estado que ya tiene (V34) → 409 y no cambia nada', async () => {
+    const { service, recorder } = buildService({ stored: [ANA] });
+    await assertAppError(service.changePaymentStatus(7, ADMIN_ID, { status: 'Aprobado' }), 409, 'El pago ya tiene ese estado');
+    assert.equal(recorder.paymentUpdates.length, 0);
+    assert.equal(recorder.actions.length, 0);
+  });
+
+  test('reserva cancelada (V33) → 409; y un rechazo no se deshace', async () => {
+    const { service, recorder } = buildService({ stored: [CARLA, ANA] });
+    await assertAppError(
+      service.changePaymentStatus(8, ADMIN_ID, { status: 'Aprobado' }),
+      409,
+      'No se puede cambiar el pago de una reserva cancelada',
+    );
+    // Rechazar el de Ana y luego intentar volver a Aprobado
+    await service.changePaymentStatus(7, ADMIN_ID, { status: 'Rechazado', reason: 'No llegó el pago' });
+    await assertAppError(
+      service.changePaymentStatus(7, ADMIN_ID, { status: 'Aprobado' }),
+      409,
+      'No se puede cambiar el pago de una reserva cancelada',
+    );
+    assert.deepEqual(recorder.paymentUpdates, [{ paymentId: 7, status: 'Rechazado' }]);
+  });
+
+  test('dejar Pendiente el pago de una reserva Aprobada (V35) → 409', async () => {
+    const { service, recorder } = buildService({ stored: [LUIS] });
+    await assertAppError(
+      service.changePaymentStatus(9, ADMIN_ID, { status: 'Pendiente' }),
+      409,
+      'No se puede dejar pendiente el pago de una reserva aprobada',
+    );
+    assert.equal(recorder.paymentUpdates.length, 0);
+  });
+
+  test('un intento de pago ANTERIOR, no el más reciente (V32) → 409', async () => {
+    const { service, recorder } = buildService({ stored: [ANA], oldPayments: [{ paymentId: 6, reservationId: 1 }] });
+    await assertAppError(
+      service.changePaymentStatus(6, ADMIN_ID, { status: 'Aprobado' }),
+      409,
+      'Solo se puede cambiar el pago más reciente de la reserva',
+    );
+    assert.equal(recorder.paymentUpdates.length, 0);
+  });
+
+  test('pago inexistente o de una reserva eliminada (CU-15 2a) → 404', async () => {
+    const { service } = buildService({ stored: [CARLA] });
+    await assertAppError(service.changePaymentStatus(99, ADMIN_ID, { status: 'Aprobado' }), 404, 'El pago no existe');
+    await service.remove(2, ADMIN_ID, {});
+    await assertAppError(service.changePaymentStatus(8, ADMIN_ID, { status: 'Aprobado' }), 404, 'El pago no existe');
   });
 });

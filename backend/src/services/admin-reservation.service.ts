@@ -5,7 +5,8 @@
 
 import { AppError } from '../errors/app-error';
 import type { AdminActionType } from '../models/admin-action.entity';
-import type { AdminActionInput } from '../models/admin-reservation.schema';
+import type { AdminActionInput, ChangePaymentStatusInput } from '../models/admin-reservation.schema';
+import type { PaymentStatus } from '../models/payment.entity';
 import type { AdminActionRepository } from '../repositories/admin-action.repository';
 import type {
   AdminReservationDetails,
@@ -26,6 +27,25 @@ const PAYMENT_NOT_APPROVED_MESSAGE = 'El pago de la reserva no está aprobado';
 const ALREADY_CANCELLED_MESSAGE = 'La reserva ya está cancelada';
 // V24: eliminar una que no está cancelada
 const DELETE_ONLY_CANCELLED_MESSAGE = 'Solo se pueden eliminar reservas canceladas';
+// NUEVO (8.F): mensajes del cambio de pago (CU-15)
+// CU-15 2a: el pago no existe (o su reserva fue eliminada)
+const PAYMENT_NOT_FOUND_MESSAGE = 'El pago no existe';
+// V32: solo el intento de pago más reciente de la reserva
+const PAYMENT_NOT_LATEST_MESSAGE = 'Solo se puede cambiar el pago más reciente de la reserva';
+// V33 (N-1, "no se deshace"): reserva cancelada, por el turista, el admin o un rechazo
+const PAYMENT_RESERVATION_CANCELLED_MESSAGE = 'No se puede cambiar el pago de una reserva cancelada';
+// V34
+const PAYMENT_SAME_STATUS_MESSAGE = 'El pago ya tiene ese estado';
+// V35 (coherente con V22): una reserva aprobada no puede quedar sin pago confirmado
+const PAYMENT_PENDING_APPROVED_MESSAGE = 'No se puede dejar pendiente el pago de una reserva aprobada';
+
+// NUEVO (8.F): acción del historial para cada estado nuevo del pago (V13)
+// Record<A, B> = un mapa fijo con una entrada por cada estado (como un EnumMap de Java)
+const PAYMENT_ACTIONS: Record<PaymentStatus, AdminActionType> = {
+  Pendiente: 'pago_pendiente',
+  Aprobado: 'pago_aprobado',
+  Rechazado: 'pago_rechazado',
+};
 
 // Lo que el servicio necesita de los repositorios dentro de la transacción. Solo esos métodos:
 // así las pruebas pueden pasar repositorios falsos (mismo patrón que ReservationStores).
@@ -39,6 +59,9 @@ export interface AdminReservationStores {
     | 'approveReservation'
     | 'cancelReservation'
     | 'markDeleted'
+    // NUEVO (8.F)
+    | 'findPaymentForUpdate'
+    | 'updatePaymentStatus'
   >;
   adminActions: Pick<AdminActionRepository, 'record'>;
 }
@@ -50,14 +73,24 @@ export type AdminRunInTransaction = <T>(work: (stores: AdminReservationStores) =
 // Una reserva tal como la ve el admin (V17): la misma forma que el turista + id y reschedules
 export interface AdminReservationResult extends ReservationResult {
   id: number;
+  // CAMBIO (8.F, V29): el pago del admin incluye su id
+  payment: ReservationResult['payment'] & { id: number };
   reschedules: number;
 }
 
 // Arma la respuesta del admin a partir de la del turista (V19: no se copia la lógica).
-// Ejemplo: { id: 1, code: 'VY-F57NXNW9', ..., reschedules: 2 }
-//   → { id: 1, code: 'VY-F57NXNW9', status, destination, ..., payment, createdAt, reschedules: 2 }
+// CAMBIO (8.F, V29): el bloque "payment" del admin lleva además el id del pago, primero.
+// Ejemplo: { id: 1, code: 'VY-F57NXNW9', ..., paymentId: 7, reschedules: 2 }
+//   → { id: 1, code, ..., payment: { id: 7, status, cardLastDigit }, createdAt, reschedules: 2 }
 function buildAdminReservationResult(details: AdminReservationDetails): AdminReservationResult {
-  return { id: details.id, ...buildReservationResult(details), reschedules: details.reschedules };
+  const result = buildReservationResult(details);
+  return {
+    id: details.id,
+    ...result,
+    // Se reemplaza "payment" en su mismo lugar, ahora con el id adelante
+    payment: { id: details.paymentId, ...result.payment },
+    reschedules: details.reschedules,
+  };
 }
 
 // NUEVO (8.C-8.E): busca la reserva y la BLOQUEA (V27); si no existe o está eliminada → 404 (V20).
@@ -160,6 +193,41 @@ export class AdminReservationService {
       }
       await stores.reservations.markDeleted(id);
       await recordAction(stores, id, adminId, 'eliminar', input);
+    });
+  }
+
+  // NUEVO (8.F) CU-15 + N-1: cambiar el estado del pago (V29 a V38).
+  // - Rechazado: el pago queda 'Rechazado' y la reserva 'Cancelada' (libera el cupo), con motivo
+  //   obligatorio (lo exige la plantilla) y AUNQUE falten 48 h o menos (8.1 = A, V36).
+  // - Pendiente o Aprobado: solo cambia el pago.
+  // Ejemplo: (7, 3, { status: 'Rechazado', reason: 'No llegó el pago' }) → reserva 'Cancelada',
+  //   pago 'Rechazado'; historial 'pago_rechazado' con el motivo
+  changePaymentStatus(paymentId: number, adminId: number, input: ChangePaymentStatusInput): Promise<AdminReservationResult> {
+    return this.runInTransaction(async (stores) => {
+      const payment = await stores.reservations.findPaymentForUpdate(paymentId);
+      if (!payment) {
+        throw new AppError(404, 'NOT_FOUND', PAYMENT_NOT_FOUND_MESSAGE);
+      }
+      if (!payment.isLatest) {
+        throw new AppError(409, 'CONFLICT', PAYMENT_NOT_LATEST_MESSAGE);
+      }
+      if (payment.reservationStatus === 'Cancelada') {
+        throw new AppError(409, 'CONFLICT', PAYMENT_RESERVATION_CANCELLED_MESSAGE);
+      }
+      if (payment.paymentStatus === input.status) {
+        throw new AppError(409, 'CONFLICT', PAYMENT_SAME_STATUS_MESSAGE);
+      }
+      if (input.status === 'Pendiente' && payment.reservationStatus === 'Aprobada') {
+        throw new AppError(409, 'CONFLICT', PAYMENT_PENDING_APPROVED_MESSAGE);
+      }
+
+      await stores.reservations.updatePaymentStatus(paymentId, input.status);
+      if (input.status === 'Rechazado') {
+        // N-1: el dinero no llegó → la reserva se cancela y el cupo queda libre (sin RN-02)
+        await stores.reservations.cancelReservation(payment.reservationId);
+      }
+      await recordAction(stores, payment.reservationId, adminId, PAYMENT_ACTIONS[input.status], input);
+      return readResult(stores, payment.reservationId);
     });
   }
 }
