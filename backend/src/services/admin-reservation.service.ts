@@ -1,0 +1,165 @@
+// ReservaService, parte del administrador (SAD 3.1: CAR-08; decisión 2 = B del Paso 8).
+// Gestión de reservas desde el módulo admin (RF-08, CU-11 a CU-14). Va separado del servicio
+// del turista para no mezclar sus reglas y para que las partes N (reagenda del admin, rechazo
+// del pago) queden aisladas (C6). Comparte con él las reglas puras y la forma de la respuesta.
+
+import { AppError } from '../errors/app-error';
+import type { AdminActionType } from '../models/admin-action.entity';
+import type { AdminActionInput } from '../models/admin-reservation.schema';
+import type { AdminActionRepository } from '../repositories/admin-action.repository';
+import type {
+  AdminReservationDetails,
+  AdminReservationRef,
+  ReservationRepository,
+} from '../repositories/reservation.repository';
+import { canChangeReservation } from './business-rules';
+import { buildReservationResult, CANCEL_WINDOW_MESSAGE, type ReservationResult } from './reservation.service';
+
+// NUEVO (8.C-8.E): mensajes de las acciones del admin
+// V20: id inválido, inexistente o de una reserva eliminada (CU-12/13/14 2a)
+const NOT_FOUND_MESSAGE = 'La reserva no existe';
+// V21: aprobar algo que no está pendiente (CU-12 2a: "ya fue procesada")
+const ALREADY_PROCESSED_MESSAGE = 'La reserva ya fue procesada';
+// V22: aprobar una reserva cuyo pago no está aprobado
+const PAYMENT_NOT_APPROVED_MESSAGE = 'El pago de la reserva no está aprobado';
+// V23: cancelar una que ya está cancelada (CU-13 2a)
+const ALREADY_CANCELLED_MESSAGE = 'La reserva ya está cancelada';
+// V24: eliminar una que no está cancelada
+const DELETE_ONLY_CANCELLED_MESSAGE = 'Solo se pueden eliminar reservas canceladas';
+
+// Lo que el servicio necesita de los repositorios dentro de la transacción. Solo esos métodos:
+// así las pruebas pueden pasar repositorios falsos (mismo patrón que ReservationStores).
+// CAMBIO (8.C-8.E): se agregan los métodos de aprobar, cancelar y eliminar, y el historial.
+export interface AdminReservationStores {
+  reservations: Pick<
+    ReservationRepository,
+    | 'findAllForAdmin'
+    | 'findByIdForUpdate'
+    | 'findDetailsById'
+    | 'approveReservation'
+    | 'cancelReservation'
+    | 'markDeleted'
+  >;
+  adminActions: Pick<AdminActionRepository, 'record'>;
+}
+
+// Igual que RunInTransaction del turista, pero entrega las piezas del admin.
+// En la app real es AppDataSource.transaction (ver app.ts); en las pruebas, una función falsa.
+export type AdminRunInTransaction = <T>(work: (stores: AdminReservationStores) => Promise<T>) => Promise<T>;
+
+// Una reserva tal como la ve el admin (V17): la misma forma que el turista + id y reschedules
+export interface AdminReservationResult extends ReservationResult {
+  id: number;
+  reschedules: number;
+}
+
+// Arma la respuesta del admin a partir de la del turista (V19: no se copia la lógica).
+// Ejemplo: { id: 1, code: 'VY-F57NXNW9', ..., reschedules: 2 }
+//   → { id: 1, code: 'VY-F57NXNW9', status, destination, ..., payment, createdAt, reschedules: 2 }
+function buildAdminReservationResult(details: AdminReservationDetails): AdminReservationResult {
+  return { id: details.id, ...buildReservationResult(details), reschedules: details.reschedules };
+}
+
+// NUEVO (8.C-8.E): busca la reserva y la BLOQUEA (V27); si no existe o está eliminada → 404 (V20).
+// Ejemplo: (stores, 1) → { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado' }
+async function lockReservation(stores: AdminReservationStores, id: number): Promise<AdminReservationRef> {
+  const reservation = await stores.reservations.findByIdForUpdate(id);
+  if (!reservation) {
+    throw new AppError(404, 'NOT_FOUND', NOT_FOUND_MESSAGE);
+  }
+  return reservation;
+}
+
+// NUEVO (8.C-8.E): anota en el historial una acción "simple" (sin fechas, V12) en la MISMA
+// transacción (V14). El motivo es opcional en estas acciones (V10, V26): sin motivo → null.
+// Ejemplo: (stores, 1, 3, 'aprobar', {}) → fila { reserva 1, admin 3, 'aprobar', motivo null }
+async function recordAction(
+  stores: AdminReservationStores,
+  reservationId: number,
+  adminId: number,
+  action: AdminActionType,
+  input: AdminActionInput,
+): Promise<void> {
+  await stores.adminActions.record({
+    reservationId,
+    adminId,
+    action,
+    reason: input.reason ?? null,
+    previousDate: null,
+    newDate: null,
+  });
+}
+
+// NUEVO (8.C-8.D): lee la reserva ya cambiada (dentro de la transacción) y arma la respuesta.
+// Si no la encuentra es un error interno: se acaba de bloquear y nadie más puede borrarla.
+async function readResult(stores: AdminReservationStores, id: number): Promise<AdminReservationResult> {
+  const details = await stores.reservations.findDetailsById(id);
+  if (!details) {
+    throw new Error(`La reserva ${id} desapareció dentro de la transacción`);
+  }
+  return buildAdminReservationResult(details);
+}
+
+export class AdminReservationService {
+  constructor(private readonly runInTransaction: AdminRunInTransaction) {}
+
+  // CU-11: listado de reservas (V15 a V18). Solo lee: no bloquea ni guarda nada.
+  // Va por runInTransaction (como lookup del turista) para usar las mismas piezas falsas.
+  // Ejemplo: () → [{ id: 1, code: 'VY-F57NXNW9', status: 'Pendiente', ... }] o [] si no hay
+  list(): Promise<AdminReservationResult[]> {
+    return this.runInTransaction(async ({ reservations }) => {
+      const rows = await reservations.findAllForAdmin();
+      return rows.map(buildAdminReservationResult);
+    });
+  }
+
+  // NUEVO (8.C) CU-12: aprobar. Solo desde 'Pendiente' (V21) y con el pago 'Aprobado' (V22).
+  // Ejemplo: (1, 3, {}) → la reserva 1 con status 'Aprobada'; historial 'aprobar'
+  approve(id: number, adminId: number, input: AdminActionInput): Promise<AdminReservationResult> {
+    return this.runInTransaction(async (stores) => {
+      const reservation = await lockReservation(stores, id);
+      if (reservation.status !== 'Pendiente') {
+        throw new AppError(409, 'CONFLICT', ALREADY_PROCESSED_MESSAGE);
+      }
+      if (reservation.paymentStatus !== 'Aprobado') {
+        throw new AppError(409, 'CONFLICT', PAYMENT_NOT_APPROVED_MESSAGE);
+      }
+      await stores.reservations.approveReservation(id);
+      await recordAction(stores, id, adminId, 'aprobar', input);
+      return readResult(stores, id);
+    });
+  }
+
+  // NUEVO (8.D) CU-13: cancelar desde el admin. Desde 'Pendiente' o 'Aprobada'; ya cancelada →
+  // 409 (V23). Respeta RN-02 (8.2b = no): 48 h o menos → 422, el mismo mensaje del turista.
+  // El pago no se toca y no se bloquea el destino (como V7 y V8): el cupo se libera solo.
+  // Ejemplo: (1, 3, { reason: 'Pedido del cliente' }, ahora) → status 'Cancelada'; historial 'cancelar'
+  cancel(id: number, adminId: number, input: AdminActionInput, now: Date = new Date()): Promise<AdminReservationResult> {
+    return this.runInTransaction(async (stores) => {
+      const reservation = await lockReservation(stores, id);
+      if (reservation.status === 'Cancelada') {
+        throw new AppError(409, 'CONFLICT', ALREADY_CANCELLED_MESSAGE);
+      }
+      if (!canChangeReservation(reservation.travelDate, now)) {
+        throw new AppError(422, 'BUSINESS_RULE', CANCEL_WINDOW_MESSAGE);
+      }
+      await stores.reservations.cancelReservation(id);
+      await recordAction(stores, id, adminId, 'cancelar', input);
+      return readResult(stores, id);
+    });
+  }
+
+  // NUEVO (8.E) CU-14: eliminar. Solo reservas 'Cancelada' (V24); borrado lógico. No devuelve
+  // nada: el controlador responde 204 (V25). Se llama "remove" porque "delete" confunde con SQL.
+  // Ejemplo: (1, 3, {}) → la reserva 1 queda con eliminado_en; historial 'eliminar'
+  remove(id: number, adminId: number, input: AdminActionInput): Promise<void> {
+    return this.runInTransaction(async (stores) => {
+      const reservation = await lockReservation(stores, id);
+      if (reservation.status !== 'Cancelada') {
+        throw new AppError(409, 'CONFLICT', DELETE_ONLY_CANCELLED_MESSAGE);
+      }
+      await stores.reservations.markDeleted(id);
+      await recordAction(stores, id, adminId, 'eliminar', input);
+    });
+  }
+}

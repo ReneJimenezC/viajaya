@@ -1,0 +1,81 @@
+### Pruebas manuales de RF-08 (reservas del administrador, CU-11 a CU-14) con REST Client.
+### Ejecútalas EN ORDEN: la 3 toma el id de la reserva que crea la 2, y de la 4 a la 11 usan ese id.
+### Primero ejecuta "login": cuando lo pida, escribe la contraseña de ADMIN_PASSWORD del .env, SIN las comillas.
+
+@baseUrl = http://127.0.0.1:3000
+@token = {{login.response.body.accessToken}}
+# La reserva de la prueba 2 viaja en 400 días: como el listado va de la fecha más lejana a la
+# más cercana (V16), siempre queda PRIMERA. $[0].id = el id del primer elemento de la lista.
+@reservaId = {{lista.response.body.$[0].id}}
+
+# @name login
+# @prompt password
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@viajaya.test", "password": "{{password}}" }
+
+### 1. Sin token → 401
+GET {{baseUrl}}/admin/reservas
+
+### 2. Crear una reserva de prueba (como turista) para dentro de 400 días → 201
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 400 d}}", "people": 2, "customerName": "Prueba Admin", "customerEmail": "admin.prueba@correo.com", "cardNumber": "4111111111111112" }
+
+### 3. Listar (CU-11) → 200; la primera es "Prueba Admin", con su "id" y "reschedules"
+# @name lista
+GET {{baseUrl}}/admin/reservas
+Authorization: Bearer {{token}}
+
+### 4. Aprobar sin body (CU-12) → 200 con "status": "Aprobada"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/aprobar
+Authorization: Bearer {{token}}
+
+### 5. Aprobarla otra vez (CU-12 2a, V21) → 409 "La reserva ya fue procesada"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/aprobar
+Authorization: Bearer {{token}}
+
+### 6. Eliminarla estando aprobada (V24) → 409 "Solo se pueden eliminar reservas canceladas"
+DELETE {{baseUrl}}/admin/reservas/{{reservaId}}
+Authorization: Bearer {{token}}
+
+### 7. Cancelar con motivo (CU-13) → 200 con "status": "Cancelada"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/cancelar
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "reason": "Pedido del cliente por teléfono" }
+
+### 8. Cancelarla otra vez (CU-13 2a, V23) → 409 "La reserva ya está cancelada"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/cancelar
+Authorization: Bearer {{token}}
+
+### 9. Motivo de solo espacios (V10) → 400 con details en "reason"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/cancelar
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "reason": "   " }
+
+### 10. Eliminar con motivo (CU-14) → 204 sin contenido
+DELETE {{baseUrl}}/admin/reservas/{{reservaId}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "reason": "Reserva de prueba" }
+
+### 11. Aprobar la eliminada (V20) → 404 "La reserva no existe"
+POST {{baseUrl}}/admin/reservas/{{reservaId}}/aprobar
+Authorization: Bearer {{token}}
+
+### 12. Id imposible (V20) → 404 "La reserva no existe"
+POST {{baseUrl}}/admin/reservas/abc/aprobar
+Authorization: Bearer {{token}}
+
+### 13. Cancelar con 48 h o menos (RN-02, 8.2b = no) → 422
+### Cambia el 0 por el id de una reserva Pendiente que viaje MAÑANA: la crea la prueba 16 de
+### reservations.http ("Viaje Pronto"); búscala en la respuesta de la prueba 3 (vuelve a ejecutarla).
+POST {{baseUrl}}/admin/reservas/2/cancelar
+Authorization: Bearer {{token}}

@@ -66,8 +66,29 @@ export interface ActiveReservationRef {
   travelDate: string;
 }
 
-// NUEVO (6.D): forma de cada fila que devuelve la consulta de findActiveByCodeAndEmail
+// NUEVO (8.B): una reserva tal como la ve el admin (V17): lo mismo que el turista + el id
+// interno (para las rutas /admin/reservas/:id) y cuántas veces se cambió de fecha.
+export interface AdminReservationDetails extends ReservationDetails {
+  id: number;
+  reschedules: number;
+}
+
+
+
+// NUEVO (8.C-8.E): lo mínimo de una reserva para que el admin la apruebe, cancele o elimine:
+// su estado, su fecha (RN-02 al cancelar) y el estado de su pago más reciente (V22).
+// Ejemplo: { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado' }
+export interface AdminReservationRef {
+  id: number;
+  status: ReservationStatus;
+  travelDate: string;
+  paymentStatus: PaymentStatus;
+}
+
+// NUEVO (6.D): forma de cada fila que devuelve DETAILS_SELECT
+// CAMBIO (8.B): también la usa findAllForAdmin; se agregan id_reserva y reagendas
 interface ReservationDetailsRow {
+  id_reserva: number;
   codigo: string;
   estado: ReservationStatus;
   id_destino: number;
@@ -83,7 +104,52 @@ interface ReservationDetailsRow {
   monto_total: string;
   pago_estado: PaymentStatus;
   tarjeta_ultimo_digito: number;
+  reagendas: number;
   creado_en: Date;
+}
+
+// NUEVO (8.B, V19): el SELECT de una reserva completa, con su destino y su pago, SIN el WHERE.
+// Lo comparten la consulta del turista y el listado del admin; cada una agrega su propio filtro.
+// - fecha_viaje::text: así llega "2026-12-10" tal cual (sin ::text, el driver la
+//   convertiría a un Date de JavaScript con hora y zona)
+// - JOIN LATERAL: trae el pago MÁS RECIENTE de la reserva (hoy hay uno solo por
+//   reserva; así ya queda listo si algún día se permiten reintentos, SAD 3.1: 1..N)
+const DETAILS_SELECT = `
+  SELECT r.id_reserva, r.codigo, r.estado, r.id_destino, d.nombre AS destino_nombre,
+         d.lugar AS destino_lugar, r.fecha_viaje::text AS fecha_viaje, r.nombre_cliente,
+         r.email_cliente, r.cantidad_personas, r.precio_base, r.subtotal, r.iva, r.monto_total,
+         p.estado AS pago_estado, p.tarjeta_ultimo_digito, r.reagendas, r.creado_en
+    FROM reservas r
+    JOIN destinos d ON d.id_destino = r.id_destino
+    JOIN LATERAL (
+         SELECT estado, tarjeta_ultimo_digito
+           FROM pagos
+          WHERE id_reserva = r.id_reserva
+          ORDER BY fecha DESC, id_pago DESC
+          LIMIT 1
+    ) p ON true`;
+
+// NUEVO (8.B, V19): pasa una fila de la base (nombres en español) a los nombres del código
+// (inglés). Antes estaba dentro de findActiveByCodeAndEmail; ahora la usan las dos búsquedas.
+// Ejemplo: { codigo: 'VY-F57NXNW9', reagendas: 2, ... } → { code: 'VY-F57NXNW9', reschedules: 2, ... }
+function toDetails(row: ReservationDetailsRow): AdminReservationDetails {
+  return {
+    id: row.id_reserva,
+    code: row.codigo,
+    status: row.estado,
+    destination: { id: row.id_destino, name: row.destino_nombre, place: row.destino_lugar },
+    travelDate: row.fecha_viaje,
+    customerName: row.nombre_cliente,
+    customerEmail: row.email_cliente,
+    people: row.cantidad_personas,
+    basePrice: row.precio_base,
+    subtotal: row.subtotal,
+    iva: row.iva,
+    total: row.monto_total,
+    payment: { status: row.pago_estado, cardLastDigit: row.tarjeta_ultimo_digito },
+    reschedules: row.reagendas,
+    createdAt: row.creado_en,
+  };
 }
 
 export class ReservationRepository {
@@ -127,24 +193,10 @@ export class ReservationRepository {
   // El código ya llega en mayúsculas y el correo en minúsculas, como se guardaron.
   // Ejemplo: ('VY-F57NXNW9', 'ana@correo.com') → { code: 'VY-F57NXNW9', status: 'Pendiente', ... }
   async findActiveByCodeAndEmail(code: string, email: string): Promise<ReservationDetails | null> {
+    // CAMBIO (8.B, V19): el SELECT y la conversión ahora son compartidos (DETAILS_SELECT y
+    // toDetails); aquí solo queda el filtro de la consulta del turista
     const rows: ReservationDetailsRow[] = await this.manager.query(
-      // - fecha_viaje::text: así llega "2026-12-10" tal cual (sin ::text, el driver la
-      //   convertiría a un Date de JavaScript con hora y zona)
-      // - JOIN LATERAL: trae el pago MÁS RECIENTE de la reserva (hoy hay uno solo por
-      //   reserva; así ya queda listo si algún día se permiten reintentos, SAD 3.1: 1..N)
-      `SELECT r.codigo, r.estado, r.id_destino, d.nombre AS destino_nombre, d.lugar AS destino_lugar,
-              r.fecha_viaje::text AS fecha_viaje, r.nombre_cliente, r.email_cliente,
-              r.cantidad_personas, r.precio_base, r.subtotal, r.iva, r.monto_total,
-              p.estado AS pago_estado, p.tarjeta_ultimo_digito, r.creado_en
-         FROM reservas r
-         JOIN destinos d ON d.id_destino = r.id_destino
-         JOIN LATERAL (
-              SELECT estado, tarjeta_ultimo_digito
-                FROM pagos
-               WHERE id_reserva = r.id_reserva
-               ORDER BY fecha DESC, id_pago DESC
-               LIMIT 1
-         ) p ON true
+      `${DETAILS_SELECT}
         WHERE r.codigo = $1
           AND r.email_cliente = $2
           AND r.estado = ANY($3)
@@ -152,25 +204,21 @@ export class ReservationRepository {
       [code, email, ACTIVE_STATES],
     );
     const row = rows[0];
-    if (!row) {
-      return null;
-    }
-    // Se pasa de los nombres de la base (español) a los del código (inglés)
-    return {
-      code: row.codigo,
-      status: row.estado,
-      destination: { id: row.id_destino, name: row.destino_nombre, place: row.destino_lugar },
-      travelDate: row.fecha_viaje,
-      customerName: row.nombre_cliente,
-      customerEmail: row.email_cliente,
-      people: row.cantidad_personas,
-      basePrice: row.precio_base,
-      subtotal: row.subtotal,
-      iva: row.iva,
-      total: row.monto_total,
-      payment: { status: row.pago_estado, cardLastDigit: row.tarjeta_ultimo_digito },
-      createdAt: row.creado_en,
-    };
+    return row ? toDetails(row) : null;
+  }
+
+  // NUEVO (8.B): todas las reservas para el listado del admin (CU-11). Incluye pendientes,
+  // aprobadas y canceladas; NO las eliminadas (V15). La de viaje más reciente primero y, en
+  // empate, la última creada (V16). Sin reservas → [] (V18).
+  // Ejemplo: () → [{ id: 2, code: 'VY-N7WYTNPA', ... }, { id: 1, code: 'VY-F57NXNW9', ... }]
+  async findAllForAdmin(): Promise<AdminReservationDetails[]> {
+    const rows: ReservationDetailsRow[] = await this.manager.query(
+      `${DETAILS_SELECT}
+        WHERE r.eliminado_en IS NULL
+        ORDER BY r.fecha_viaje DESC, r.id_reserva DESC`,
+    );
+    // map = recorrer y convertir cada fila (como stream().map(...).toList() en Java)
+    return rows.map(toDetails);
   }
 
   // NUEVO (6.E): busca la reserva ACTIVA con ese código y ese correo y BLOQUEA su fila hasta el
@@ -206,5 +254,62 @@ export class ReservationRepository {
   // El pago no se toca (V7). Ejemplo: (1) → la reserva 1 queda con estado 'Cancelada'
   async cancelReservation(id: number): Promise<void> {
     await this.manager.query("UPDATE reservas SET estado = 'Cancelada' WHERE id_reserva = $1", [id]);
+  }
+
+
+  
+  // NUEVO (8.C-8.E): busca la reserva por su id (no eliminada) y BLOQUEA su fila hasta el fin de
+  // la transacción (V27): con un doble clic del admin, la segunda petición espera a la primera.
+  // "FOR UPDATE OF r" bloquea solo la fila de reservas (no la del pago que se lee al lado).
+  // Devuelve null si no existe o está eliminada (V20).
+  // Ejemplo: (1) → { id: 1, status: 'Pendiente', travelDate: '2026-12-10', paymentStatus: 'Aprobado' }
+  async findByIdForUpdate(id: number): Promise<AdminReservationRef | null> {
+    const rows: { id_reserva: number; estado: ReservationStatus; fecha_viaje: string; pago_estado: PaymentStatus }[] =
+      await this.manager.query(
+        `SELECT r.id_reserva, r.estado, r.fecha_viaje::text AS fecha_viaje, p.estado AS pago_estado
+           FROM reservas r
+           JOIN LATERAL (
+                SELECT estado
+                  FROM pagos
+                 WHERE id_reserva = r.id_reserva
+                 ORDER BY fecha DESC, id_pago DESC
+                 LIMIT 1
+           ) p ON true
+          WHERE r.id_reserva = $1
+            AND r.eliminado_en IS NULL
+          FOR UPDATE OF r`,
+        [id],
+      );
+    const row = rows[0];
+    return row
+      ? { id: row.id_reserva, status: row.estado, travelDate: row.fecha_viaje, paymentStatus: row.pago_estado }
+      : null;
+  }
+
+  // NUEVO (8.C-8.E): una reserva completa por su id, con la forma del admin (para responder
+  // después de aprobarla o cancelarla). Se lee DENTRO de la misma transacción, así ya trae el
+  // estado nuevo. Ejemplo: (1) → { id: 1, code: 'VY-F57NXNW9', status: 'Aprobada', ... }
+  async findDetailsById(id: number): Promise<AdminReservationDetails | null> {
+    const rows: ReservationDetailsRow[] = await this.manager.query(
+      `${DETAILS_SELECT}
+        WHERE r.id_reserva = $1
+          AND r.eliminado_en IS NULL`,
+      [id],
+    );
+    const row = rows[0];
+    return row ? toDetails(row) : null;
+  }
+
+  // NUEVO (8.C): marca la reserva como aprobada (CU-12 paso 7).
+  // Ejemplo: (1) → la reserva 1 queda con estado 'Aprobada'
+  async approveReservation(id: number): Promise<void> {
+    await this.manager.query("UPDATE reservas SET estado = 'Aprobada' WHERE id_reserva = $1", [id]);
+  }
+
+  // NUEVO (8.E): borrado LÓGICO (CU-14, V24): la fila se queda (con su pago y su historial),
+  // pero con fecha en eliminado_en ya no aparece en el listado ni en la consulta.
+  // Ejemplo: (1) → la reserva 1 queda con eliminado_en = ahora
+  async markDeleted(id: number): Promise<void> {
+    await this.manager.query('UPDATE reservas SET eliminado_en = now() WHERE id_reserva = $1', [id]);
   }
 }
