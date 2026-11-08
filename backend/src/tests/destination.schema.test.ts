@@ -8,7 +8,7 @@ import {
   searchDestinationsSchema,
   updateDestinationSchema,
 } from '../models/destination.schema';
-import { isFutureTravelDate, todayInCostaRica } from '../services/reservation.service';
+import { isFutureTravelDate, todayInCostaRica } from '../services/business-rules';
 
 const VALID = { name: 'Volcán Poás', place: 'Alajuela', basePrice: 25000, dailyCapacity: 30 };
 

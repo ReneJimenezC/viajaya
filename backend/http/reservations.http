@@ -1,0 +1,145 @@
+### Pruebas manuales de RF-03 (reservar y pagar, CU-03), RF-04 (consultar, CU-04), RF-05 (cambiar fecha, CU-05)
+### y RF-06 (cancelar, CU-06).
+### Públicas: no necesitan login.
+### Destinos de tu base: 4 = Tortuguero (capacidad 20, ₡47 500), 14 = Volcán Irazú (desactivado).
+### Ejecútalas EN ORDEN: la 3 depende de las 2 personas que reserva la 1.
+### Las pruebas 7 a 15 usan la reserva que YA tienes en la base: VY-F57NXNW9 (ana@correo.com, 10/12).
+### La consulta, el cambio de fecha y la cancelación comparten un límite de 10 intentos FALLIDOS cada 15 min
+### por IP. Este archivo completo gasta 9. Si lo repites, antes: docker compose ... restart api
+### Las fechas de las pruebas 16 y 18 se calculan solas desde HOY (con $localDatetime), así no se vencen.
+
+@baseUrl = http://127.0.0.1:3000
+
+### 1. Reserva correcta (tarjeta termina en 2 = par) → 201 con code "VY-...", Pendiente y pago Aprobado
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 2, "customerName": "Ana Mora", "customerEmail": " Ana@Correo.com", "cardNumber": "4111111111111112" }
+
+### 2. Tarjeta impar (CU-03 6a) → 402 PAYMENT_DECLINED, no se guarda nada
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 2, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111113" }
+
+### 3. Más personas que el cupo que queda (CU-03 5a) → 409 "Cupos disponibles: 18"
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 19, "customerName": "Grupo", "customerEmail": "grupo@correo.com", "cardNumber": "4111111111111110" }
+
+### 4. Destino desactivado → 404 "El destino no está disponible"
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 14, "travelDate": "2026-12-10", "people": 1, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111112" }
+
+### 5. Fecha pasada → 400 (travelDate)
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-01-10", "people": 1, "customerName": "Ana Mora", "customerEmail": "ana@correo.com", "cardNumber": "4111111111111112" }
+
+### 6. Datos inválidos (CU-03 4a) → 400 con un detalle por campo (nombre, correo, tarjeta)
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "2026-12-10", "people": 1, "customerName": "", "customerEmail": "ana@", "cardNumber": "4111-1111" }
+
+### 7. Consulta correcta (CU-04) → 200 con la reserva completa (la misma forma que la prueba 1)
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com" }
+
+### 8. Código en minúsculas con espacios y correo con mayúsculas → 200 (se normalizan)
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": " vy-f57nxnw9 ", "customerEmail": "ANA@Correo.com" }
+
+### 9. Correo que no coincide (CU-04 5a) → 404 "No se encontró una reserva activa que coincida con los datos"
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "otra@correo.com" }
+
+### 10. Formato inválido (CU-04 4a) → 400 con detalle en code y customerEmail
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "VY-123", "customerEmail": "ana@" }
+
+### 11. Cambio de fecha correcto (CU-05) → 200 con "travelDate": "2026-12-15" y el mismo total
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-15" }
+
+### 12. La misma fecha que ya tiene (V1) → 400 "La nueva fecha debe ser distinta de la actual"
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-15" }
+
+### 13. Correo que no coincide (CU-05 4a) → 404, el mismo mensaje de la consulta
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "otra@correo.com", "travelDate": "2026-12-16" }
+
+### 14. Fecha nueva pasada → 400 (travelDate)
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-01-10" }
+
+### 15. Volver a la fecha original → 200 con "travelDate": "2026-12-10" (deja tu reserva como estaba)
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "VY-F57NXNW9", "customerEmail": "ana@correo.com", "travelDate": "2026-12-10" }
+
+### 16. Prepara la 17 y la 22: reserva de 1 persona para MAÑANA (faltan menos de 48 h) → 201
+# @name pronto
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 1 d}}", "people": 1, "customerName": "Viaje Pronto", "customerEmail": "pronto@correo.com", "cardNumber": "4111111111111112" }
+
+### 17. Faltan 48 h o menos para el viaje (RN-02, CU-05 5a) → 422 BUSINESS_RULE
+PATCH {{baseUrl}}/reservas/fecha
+Content-Type: application/json
+
+{ "code": "{{pronto.response.body.code}}", "customerEmail": "pronto@correo.com", "travelDate": "2026-12-16" }
+
+### 18. Prepara la cancelación: reserva de 2 personas para dentro de 30 días → 201
+# @name paraCancelar
+POST {{baseUrl}}/reservas
+Content-Type: application/json
+
+{ "destinationId": 4, "travelDate": "{{$localDatetime "YYYY-MM-DD" 30 d}}", "people": 2, "customerName": "Carla Rojas", "customerEmail": "carla@correo.com", "cardNumber": "4111111111111112" }
+
+### 19. Cancelación correcta (CU-06) → 200 con "status": "Cancelada" y el pago sigue "Aprobado"
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 20. Cancelar otra vez la misma (doble clic) → 404, ya no está activa
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 21. Consultar la cancelada (decisión 10) → 404
+POST {{baseUrl}}/reservas/consulta
+Content-Type: application/json
+
+{ "code": "{{paraCancelar.response.body.code}}", "customerEmail": "carla@correo.com" }
+
+### 22. Faltan 48 h o menos (RN-02, CU-06 2a): cancelar la reserva de mañana de la prueba 16 → 422 BUSINESS_RULE
+POST {{baseUrl}}/reservas/cancelar
+Content-Type: application/json
+
+{ "code": "{{pronto.response.body.code}}", "customerEmail": "pronto@correo.com" }
