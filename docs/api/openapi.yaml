@@ -12,14 +12,19 @@ info:
 
     **Estado de esta versión (iteración de Construcción):**
     - Implementado: salud del servicio, autenticación del administrador (login, renovación
-      y cierre de sesión), búsqueda de destinos (RF-01), cotización (RF-02) y CRUD de
-      destinos (RF-07).
-    - Implementado y probado como reglas de dominio (sin endpoint todavía):
-      RN-02 (ventana de 48 h) y RN-04 (pasarela simulada). RN-01 (cupo) ya se usa en la
-      búsqueda de destinos y en la cotización; RN-03 (tarifa), en la cotización.
-    - Pendiente (SAD 3.4): `POST /reservas`, `POST /reservas/consulta`,
-      `PATCH /reservas/{codigo}/fecha`, `POST /reservas/{codigo}/cancelar`,
-      `GET /admin/reservas`, `PATCH /admin/pagos/{id}`.
+      y cierre de sesión), búsqueda de destinos (RF-01), cotización (RF-02), reserva con
+      pago simulado (RF-03), consulta (RF-04), cambio de fecha (RF-05), cancelación (RF-06)
+      y CRUD de destinos (RF-07). Reglas RN-01 a RN-04 aplicadas en todas ellas.
+    - Pendiente (SAD 3.4): `GET /admin/reservas`, `PATCH /admin/reservas/{id}` (RF-08) y
+      `PATCH /admin/pagos/{id}` (RF-09).
+
+    **Diferencia con el SAD 3.4 (N-4, pendiente de aprobación):** la consulta, el cambio de
+    fecha y la cancelación reciben el código y el correo en el **body**, no en la URL:
+    `POST /reservas/consulta`, `PATCH /reservas/fecha` y `POST /reservas/cancelar` (el SAD
+    dice `GET /reservas/consulta?codigo&correo`, `PATCH /reservas/{codigo}/fecha` y
+    `POST /reservas/{codigo}/cancelar`). El código de confirmación es el secreto que da acceso
+    a la reserva; en la URL quedaría escrito en los logs del servidor y en el historial del
+    navegador.
 
     **Formato de errores (SAD 4):** todas las respuestas de error usan el esquema `Error`.
     Los mensajes van en español; `code` es fijo y en inglés para que el frontend lo compare.
@@ -41,6 +46,11 @@ tags:
     description: Búsqueda pública de destinos para el turista (RF-01).
   - name: Cotización
     description: Desglose del costo de un viaje antes de reservar (RF-02).
+  - name: Reservas
+    description: |
+      Reserva, consulta, cambio de fecha y cancelación del turista (RF-03 a RF-06). Públicas:
+      el turista no tiene cuenta y se identifica con el código de confirmación y su correo
+      (ADR-06).
   - name: Admin - Destinos
     description: Gestión de destinos del administrador (RF-07). Exigen `bearerAuth`.
 
@@ -281,6 +291,233 @@ paths:
                   message: 'No hay cupo suficiente para esa fecha. Cupos disponibles: 2'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reservas:
+    post:
+      tags: [Reservas]
+      operationId: createReservation
+      summary: Reserva un viaje y cobra con la pasarela simulada (CU-03).
+      description: |
+        Flujo del SAD 3.2: revisa que la fecha sea posterior a hoy en Costa Rica, abre una
+        transacción, **bloquea el destino** (`SELECT ... FOR UPDATE`), revisa que esté activo y
+        que haya cupo (RN-01), calcula el total (RN-03), cobra (RN-04: último dígito par =
+        aprobado) y, si se aprueba, guarda la reserva (estado `Pendiente`), su código de
+        confirmación y el pago (`Aprobado`). Si algo falla, no se guarda nada.
+
+        - Dos turistas que piden el último cupo a la vez: solo uno lo obtiene (probado con 10
+          peticiones simultáneas).
+        - El total lo calcula el servidor con el precio vigente; nunca se acepta un monto
+          enviado por el cliente.
+        - Solo se guarda el último dígito de la tarjeta (SAD 6).
+        - El código de confirmación (`VY-` + 8 caracteres) solo se muestra en esta respuesta:
+          el frontend debe pedirle al turista que lo guarde.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReservationRequest'
+      responses:
+        '201':
+          description: Reserva creada y pago aprobado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '402':
+          description: El pago fue rechazado (RN-04, CU-03 6a). No se guarda la reserva.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: PAYMENT_DECLINED
+                  message: El pago fue rechazado. Intenta con otra tarjeta.
+        '404':
+          description: El destino no existe o fue desactivado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: El destino no está disponible
+        '409':
+          description: No hay cupo suficiente para esa fecha (RN-01, CU-03 5a). No se cobra nada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: 'No hay cupo suficiente para esa fecha. Cupos disponibles: 2'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reservas/consulta:
+    post:
+      tags: [Reservas]
+      operationId: lookupReservation
+      summary: Consulta una reserva activa con su código y su correo (CU-04).
+      description: |
+        Devuelve la reserva con la **misma forma** que al crearla. "Activa" = `Pendiente` o
+        `Aprobada` y no borrada por el administrador: una cancelada responde 404, igual que un
+        código inexistente o un correo que no coincide (no da pistas sobre cuál dato falló).
+
+        - Es `POST` y no `GET`: el código va en el body (N-4, ver la descripción general).
+        - Límite: 10 intentos **fallidos** cada 15 minutos por IP, compartido con el cambio de
+          fecha y la cancelación. Al pasarlo se bloquea también al que escribe bien el código
+          (así se frena a quien prueba códigos a ciegas).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LookupRequest'
+      responses:
+        '200':
+          description: Reserva encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/ReservationNotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/LookupTooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reservas/fecha:
+    patch:
+      tags: [Reservas]
+      operationId: rescheduleReservation
+      summary: Cambia la fecha de una reserva activa (CU-05).
+      description: |
+        Flujo 2 del SAD 3.2: revisa que la fecha nueva sea posterior a hoy, abre una
+        transacción, bloquea la reserva, exige que falten **más de 48 horas** para la fecha
+        actual (RN-02), bloquea el destino y revisa el cupo en la fecha nueva (RN-01).
+
+        - El monto no cambia y el contador de reagendas suma 1.
+        - No se puede mover a la misma fecha (400) ni si el destino fue desactivado (409).
+        - Es `PATCH /reservas/fecha` con el código en el body (N-4); mismo límite de intentos
+          que la consulta.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescheduleRequest'
+      responses:
+        '200':
+          description: Fecha cambiada. Devuelve la reserva con la fecha nueva.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/ReservationNotFound'
+        '409':
+          description: No hay cupo en la fecha nueva (RN-01, CU-05 8a) o el destino fue desactivado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                sinCupo:
+                  summary: Sin cupo en la fecha nueva
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: 'No hay cupo suficiente para esa fecha. Cupos disponibles: 1'
+                destinoInactivo:
+                  summary: Destino desactivado
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: El destino ya no está disponible para cambiar la fecha
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: Faltan 48 horas o menos para la fecha del viaje (RN-02, CU-05 5a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: BUSINESS_RULE
+                  message: La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje
+        '429':
+          $ref: '#/components/responses/LookupTooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reservas/cancelar:
+    post:
+      tags: [Reservas]
+      operationId: cancelReservation
+      summary: Cancela una reserva activa (CU-06).
+      description: |
+        Flujo 2 del SAD 3.2: abre una transacción, bloquea la reserva (un doble clic no la
+        cancela dos veces), exige que falten **más de 48 horas** para la fecha del viaje
+        (RN-02) y cambia el estado a `Cancelada`. Los cupos quedan libres de inmediato.
+
+        - El pago no cambia (sigue `Aprobado`): los reembolsos están fuera del alcance (V7).
+        - Una reserva de un destino desactivado sí se puede cancelar.
+        - Después de cancelarla, la consulta responde 404.
+        - Es `POST /reservas/cancelar` con el código en el body (N-4); mismo límite de intentos
+          que la consulta.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LookupRequest'
+      responses:
+        '200':
+          description: Reserva cancelada. Devuelve la reserva con `status` = `Cancelada`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/ReservationNotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: Faltan 48 horas o menos para la fecha del viaje (RN-02, CU-06 2a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: BUSINESS_RULE
+                  message: La reserva no se puede cancelar porque faltan 48 horas o menos para la fecha del viaje
+        '429':
+          $ref: '#/components/responses/LookupTooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -642,6 +879,161 @@ components:
           iva: '12350.00'
           total: '107350.00'
 
+    ReservationRequest:
+      type: object
+      description: Los 3 campos de la cotización (con las mismas reglas) más los datos del turista y la tarjeta.
+      required: [destinationId, travelDate, people, customerName, customerEmail, cardNumber]
+      additionalProperties: false
+      properties:
+        destinationId:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        travelDate:
+          type: string
+          format: date
+          description: Fecha del viaje (AAAA-MM-DD), posterior a hoy en Costa Rica.
+        people:
+          type: integer
+          minimum: 1
+          maximum: 9999
+        customerName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Se le quitan los espacios a los lados. Acepta tildes, ñ, apóstrofes y guiones.
+        customerEmail:
+          type: string
+          format: email
+          maxLength: 254
+          description: Se le quitan los espacios a los lados y se pasa a minúsculas.
+        cardNumber:
+          type: string
+          pattern: '^[0-9]{13,19}$'
+          description: |
+            Tarjeta simulada, como texto y solo dígitos (13 a 19). Último dígito par = aprobado,
+            impar = rechazado (RN-04). Solo se guarda el último dígito.
+      example:
+        destinationId: 4
+        travelDate: '2026-12-10'
+        people: 2
+        customerName: Ana Mora
+        customerEmail: ana@correo.com
+        cardNumber: '4111111111111112'
+
+    LookupRequest:
+      type: object
+      description: Código de confirmación y correo del turista (consulta y cancelación).
+      required: [code, customerEmail]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: |
+            Código de confirmación. Se le quitan los espacios y se pasa a mayúsculas; luego
+            debe ser `VY-` + 8 caracteres de `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (sin 0, O, 1, I
+            ni L). Un formato inválido responde 400 sin consultar la base.
+          example: VY-F57NXNW9
+        customerEmail:
+          type: string
+          format: email
+          maxLength: 254
+          description: El mismo correo con el que se reservó (sin distinguir mayúsculas).
+      example:
+        code: VY-F57NXNW9
+        customerEmail: ana@correo.com
+
+    RescheduleRequest:
+      type: object
+      description: Los datos de la consulta más la fecha nueva.
+      required: [code, customerEmail, travelDate]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: Código de confirmación (mismas reglas que en `LookupRequest`).
+        customerEmail:
+          type: string
+          format: email
+          maxLength: 254
+        travelDate:
+          type: string
+          format: date
+          description: Fecha nueva (AAAA-MM-DD), posterior a hoy en Costa Rica y distinta de la actual.
+      example:
+        code: VY-F57NXNW9
+        customerEmail: ana@correo.com
+        travelDate: '2026-12-15'
+
+    Reservation:
+      type: object
+      description: |
+        Una reserva completa. Es la misma respuesta al crear, consultar, cambiar la fecha y
+        cancelar. No incluye el id interno ni el número de tarjeta.
+      required: [code, status, destination, travelDate, customerName, customerEmail, quote, payment, createdAt]
+      properties:
+        code:
+          type: string
+          pattern: '^VY-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$'
+          description: Código de confirmación; con el correo da acceso a la reserva.
+        status:
+          type: string
+          enum: [Pendiente, Aprobada, Cancelada]
+          description: Nace `Pendiente`; `Aprobada` la pone el administrador (RF-08).
+        destination:
+          type: object
+          required: [id, name, place]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            place:
+              type: string
+        travelDate:
+          type: string
+          format: date
+        customerName:
+          type: string
+        customerEmail:
+          type: string
+        quote:
+          $ref: '#/components/schemas/Quote'
+        payment:
+          type: object
+          required: [status, cardLastDigit]
+          properties:
+            status:
+              type: string
+              enum: [Pendiente, Aprobado, Rechazado]
+            cardLastDigit:
+              type: integer
+              minimum: 0
+              maximum: 9
+        createdAt:
+          type: string
+          format: date-time
+      example:
+        code: VY-F57NXNW9
+        status: Pendiente
+        destination:
+          id: 4
+          name: Tortuguero
+          place: Tortuguero, Limón
+        travelDate: '2026-12-10'
+        customerName: Ana Mora
+        customerEmail: ana@correo.com
+        quote:
+          basePrice: '47500.00'
+          people: 2
+          subtotal: '95000.00'
+          iva: '12350.00'
+          total: '107350.00'
+        payment:
+          status: Aprobado
+          cardLastDigit: 2
+        createdAt: '2026-11-06T14:12:31.123Z'
+
     LoginRequest:
       type: object
       required: [email, password]
@@ -693,12 +1085,14 @@ components:
                 - FORBIDDEN
                 - NOT_FOUND
                 - CONFLICT
+                - PAYMENT_DECLINED
                 - PAYLOAD_TOO_LARGE
                 - BUSINESS_RULE
                 - TOO_MANY_REQUESTS
                 - INTERNAL_ERROR
               description: |
-                400 VALIDATION_ERROR · 401 UNAUTHORIZED · 403 FORBIDDEN · 404 NOT_FOUND ·
+                400 VALIDATION_ERROR · 401 UNAUTHORIZED · 402 PAYMENT_DECLINED (pago
+                rechazado, RN-04) · 403 FORBIDDEN · 404 NOT_FOUND ·
                 409 CONFLICT (p. ej. sobrecupo, RN-01) · 413 PAYLOAD_TOO_LARGE ·
                 422 BUSINESS_RULE (p. ej. ventana de 48 h, RN-02) · 429 TOO_MANY_REQUESTS ·
                 500 INTERNAL_ERROR
@@ -765,6 +1159,18 @@ components:
               details:
                 - field: email
                   message: El correo no tiene un formato válido
+    ReservationNotFound:
+      description: |
+        No hay una reserva activa con ese código y ese correo (CU-04 5a). El mismo mensaje si
+        el código no existe, si el correo no coincide, si está cancelada o si fue borrada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: NOT_FOUND
+              message: No se encontró una reserva activa que coincida con los datos
     PayloadTooLarge:
       description: El body supera los 10 KB.
       content:
@@ -788,6 +1194,21 @@ components:
             error:
               code: TOO_MANY_REQUESTS
               message: Demasiados intentos de inicio de sesión. Intenta de nuevo más tarde.
+    LookupTooManyRequests:
+      description: |
+        Se superaron los 10 intentos fallidos en 15 minutos (contador compartido por la
+        consulta, el cambio de fecha y la cancelación).
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: TOO_MANY_REQUESTS
+              message: Demasiados intentos de consulta. Intenta de nuevo más tarde.
     InternalError:
       description: Error inesperado del servidor; el detalle queda solo en el log.
       content:
