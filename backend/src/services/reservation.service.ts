@@ -43,9 +43,11 @@ const LOOKUP_NOT_FOUND_MESSAGE = 'No se encontró una reserva activa que coincid
 const RESCHEDULE_WINDOW_MESSAGE =
   'La reserva no se puede modificar porque faltan 48 horas o menos para la fecha del viaje';
 // V2: el destino fue desactivado después de reservar (sección 7: "mover fecha bloqueado")
-const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
+// CAMBIO (8.G): exportado; la reagenda del admin usa el mismo mensaje (V42)
+export const RESCHEDULE_UNAVAILABLE_MESSAGE = 'El destino ya no está disponible para cambiar la fecha';
 // NUEVO (6.F): CU-06 2a (RN-02): 422 BUSINESS_RULE, como pide el SAD 4
-const CANCEL_WINDOW_MESSAGE =
+// CAMBIO (8.D): exportado; el admin también respeta RN-02 al cancelar (8.2b = no)
+export const CANCEL_WINDOW_MESSAGE =
   'La reserva no se puede cancelar porque faltan 48 horas o menos para la fecha del viaje';
 // Genera un código de confirmación con aleatoriedad criptográfica (como SecureRandom).
 // Ejemplo: "VY-7K3M9QXT". Math.random() NO sirve: es predecible.
@@ -69,7 +71,10 @@ export interface ReservationStores {
   reservations: Pick<
     ReservationRepository,
     'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'    // NUEVO (6.F): cancelReservation para la cancelación
-    | 'cancelReservation'
+    | 'cancelReservation'    // NUEVO (8.G, N-3)
+    | 'wasRescheduledByAdminTo'
+        // NUEVO (8.H, N-8): la consulta también encuentra la reserva cancelada por el admin
+    | 'findForLookup'
   >;
 }
 
@@ -109,7 +114,8 @@ export type CancelledReservation = CreatedReservation;
 // Recibe los datos sueltos y agrupa el desglose de la tarifa en el bloque "quote".
 // Ejemplo: { ..., people: 2, basePrice: '47500.00', subtotal: '95000.00', ... }
 //   → { ..., quote: { basePrice: '47500.00', people: 2, subtotal: '95000.00', iva, total }, ... }
-function buildReservationResult(details: ReservationDetails): ReservationResult {
+// CAMBIO (8.B, V19): exportada para que el servicio del admin arme la misma forma
+export function buildReservationResult(details: ReservationDetails): ReservationResult {
   return {
     code: details.code,
     status: details.status,
@@ -233,7 +239,8 @@ export class ReservationService {
   // (y las mismas piezas falsas en las pruebas) que el resto del servicio.
   async lookup(input: LookupReservationInput): Promise<ReservationResult> {
     const details = await this.runInTransaction(({ reservations }) =>
-      reservations.findActiveByCodeAndEmail(input.code, input.customerEmail),
+            // CAMBIO (8.H, N-8): también la cancelada por el admin (CU-13 o pago rechazado)
+      reservations.findForLookup(input.code, input.customerEmail),
     );
     if (!details) {
       throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
@@ -323,8 +330,13 @@ export class ReservationService {
         throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);
       }
 
-      // CU-06 paso 2 / 2a (RN-02): deben faltar MÁS de 48 h para la fecha del viaje
-      if (!canChangeReservation(reservation.travelDate, now)) {
+            // CU-06 paso 2 / 2a (RN-02): deben faltar MÁS de 48 h para la fecha del viaje.
+      // CAMBIO (8.G, N-3 y V45): excepción si la fecha actual la puso el admin (causa mayor): el
+      // turista puede cancelar aunque falten 48 h o menos. El historial solo se consulta en ese caso.
+      if (
+        !canChangeReservation(reservation.travelDate, now) &&
+        !(await reservations.wasRescheduledByAdminTo(reservation.id, reservation.travelDate))
+      ) {
         throw new AppError(422, 'BUSINESS_RULE', CANCEL_WINDOW_MESSAGE);
       }
 

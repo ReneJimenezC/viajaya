@@ -27,7 +27,11 @@ import { ReservationService } from './services/reservation.service';
 import { SimulatedPaymentGateway } from './services/payment-gateway';
 import { ReservationController } from './controllers/reservation.controller';
 import { createReservationRouter } from './routes/reservation.routes';
-
+// NUEVO (Paso 8): gestión de reservas del admin
+import { AdminActionRepository } from './repositories/admin-action.repository';
+import { AdminReservationService } from './services/admin-reservation.service';
+import { AdminReservationController } from './controllers/admin-reservation.controller';
+import { createAdminReservationRouter } from './routes/admin-reservation.routes';
 
 
 // Tamaño máximo del body: sobra para un login o una reserva (menos de 1 KB)
@@ -75,7 +79,19 @@ export function createApp(): express.Express {
     new SimulatedPaymentGateway(),
   );
   const reservationController = new ReservationController(reservationService);
-
+     // NUEVO (Paso 8): reservas del admin (RF-08). Cada acción abre una transacción con los
+  // repositorios de reservas y del historial (V14: la acción y su fila, todo o nada)
+  const adminReservationService = new AdminReservationService((work) =>
+    AppDataSource.transaction((manager) =>
+      work({
+        reservations: new ReservationRepository(manager),
+        adminActions: new AdminActionRepository(manager),
+                // NUEVO (8.G): para bloquear el destino y validar RN-01 al reagendar
+        destinations: new DestinationRepository(manager),
+      }),
+    ),
+  );
+  const adminReservationController = new AdminReservationController(adminReservationService);
   // Registra las rutas. Aquí se sumarán las de los módulos client y admin.
   app.use(healthRouter);
   app.use(createAuthRouter(authController));
@@ -83,6 +99,8 @@ export function createApp(): express.Express {
     app.use(createAdminDestinationRouter(adminDestinationController, authService));
     app.use(createQuoteRouter(quoteController));
       app.use(createReservationRouter(reservationController));
+        // NUEVO (Paso 8)
+  app.use(createAdminReservationRouter(adminReservationController, authService));
   // Ninguna ruta atendió la petición → 404
   app.use(notFoundHandler);
   // Siempre al final: convierte cualquier error en JSON

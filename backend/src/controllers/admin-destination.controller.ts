@@ -2,23 +2,13 @@
 // requireAdmin, así que req.admin siempre existe aquí.
 
 import type { Request, Response } from 'express';
-import { AppError } from '../errors/app-error';
 import type { CreateDestinationInput, UpdateDestinationInput } from '../models/destination.schema';
 import type { DestinationService } from '../services/destination.service';
+import { parseId } from './parse-id';
 
-// Id de la URL: entero positivo que cabe en una columna integer de Postgres
-const ID_PATTERN = /^[1-9]\d{0,9}$/;
-const ID_MAX = 2_147_483_647;
-
-// Convierte el :id de la URL en número. Si no es un id posible ("abc", "0", "1.5"),
-// responde 404 igual que un id inexistente. Ejemplo: "12" → 12.
-function parseId(value: string | string[] | undefined): number {
-  const id = typeof value === 'string' && ID_PATTERN.test(value) ? Number(value) : NaN;
-  if (!Number.isInteger(id) || id > ID_MAX) {
-    throw new AppError(404, 'NOT_FOUND', 'El destino no existe');
-  }
-  return id;
-}
+// CAMBIO (8.B, decisión B de C17): parseId ahora vive en parse-id.ts y la comparten los
+// controladores del admin; aquí solo se le pasa el mensaje de los destinos.
+const NOT_FOUND_MESSAGE = 'El destino no existe';
 
 export class AdminDestinationController {
   constructor(private readonly destinationService: DestinationService) {}
@@ -37,14 +27,14 @@ export class AdminDestinationController {
 
   // PATCH /admin/destinos/:id (CU-09)
   update = async (req: Request<{ id: string }, unknown, UpdateDestinationInput>, res: Response): Promise<void> => {
-    const destination = await this.destinationService.update(parseId(req.params.id), req.body);
+    const destination = await this.destinationService.update(parseId(req.params.id, NOT_FOUND_MESSAGE), req.body);
     req.log.info({ event: 'destination_updated', destinationId: destination.id, adminId: req.admin?.id }, 'Destino modificado');
     res.json(destination);
   };
 
   // POST /admin/destinos/:id/desactivar (CU-10, decisión A)
   deactivate = async (req: Request<{ id: string }>, res: Response): Promise<void> => {
-    const destination = await this.destinationService.deactivate(parseId(req.params.id));
+    const destination = await this.destinationService.deactivate(parseId(req.params.id, NOT_FOUND_MESSAGE));
     req.log.info({ event: 'destination_deactivated', destinationId: destination.id, adminId: req.admin?.id }, 'Destino desactivado');
     res.json(destination);
   };
