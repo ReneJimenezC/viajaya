@@ -1,6 +1,6 @@
 # Documentación de la interfaz (API) de ViajaYa en formato OpenAPI 3.1.
-# Describe los endpoints YA implementados. Los del SAD 3.4 que faltan se agregan
-# a este archivo al construir cada módulo.
+# Describe los endpoints implementados: todos los del SAD 3.4 (con las diferencias que se
+# explican en info.description) y los cambios nuevos (N) del administrador.
 openapi: 3.1.0
 
 info:
@@ -13,10 +13,10 @@ info:
     **Estado de esta versión (iteración de Construcción):**
     - Implementado: salud del servicio, autenticación del administrador (login, renovación
       y cierre de sesión), búsqueda de destinos (RF-01), cotización (RF-02), reserva con
-      pago simulado (RF-03), consulta (RF-04), cambio de fecha (RF-05), cancelación (RF-06)
-      y CRUD de destinos (RF-07). Reglas RN-01 a RN-04 aplicadas en todas ellas.
-    - Pendiente (SAD 3.4): `GET /admin/reservas`, `PATCH /admin/reservas/{id}` (RF-08) y
-      `PATCH /admin/pagos/{id}` (RF-09).
+      pago simulado (RF-03), consulta (RF-04), cambio de fecha (RF-05), cancelación (RF-06),
+      CRUD de destinos (RF-07), gestión de reservas del administrador (RF-08) y cambio del
+      estado del pago (RF-09). Reglas RN-01 a RN-04 aplicadas en todas ellas.
+    - Todos los endpoints del SAD 3.4 están implementados (con las diferencias de abajo).
 
     **Diferencia con el SAD 3.4 (N-4, pendiente de aprobación):** la consulta, el cambio de
     fecha y la cancelación reciben el código y el correo en el **body**, no en la URL:
@@ -25,6 +25,28 @@ info:
     `POST /reservas/{codigo}/cancelar`). El código de confirmación es el secreto que da acceso
     a la reserva; en la URL quedaría escrito en los logs del servidor y en el historial del
     navegador.
+
+    **Diferencia con el SAD 3.4 en las reservas del administrador (pendiente de aprobación):**
+    el SAD dice `PATCH /admin/reservas/{id}` para aprobar, cancelar o eliminar. Aquí cada
+    acción tiene su propia ruta, para que el método diga qué hace y cada una valide su body:
+    `POST /admin/reservas/{id}/aprobar`, `POST /admin/reservas/{id}/cancelar` y
+    `DELETE /admin/reservas/{id}` (borrado lógico). `PATCH /admin/pagos/{id}` es igual al SAD.
+
+    **Cambios nuevos aprobados verbalmente por el profesor (van al ADR-07):**
+    - **N-1:** pasar un pago a `Rechazado` cancela la reserva y libera el cupo, con motivo
+      obligatorio, aunque falten 48 horas o menos.
+    - **N-2a:** el administrador puede reagendar sin la ventana de 48 horas (RN-02), con motivo
+      obligatorio (`PATCH /admin/reservas/{id}/fecha`); el cupo (RN-01) sí se valida.
+    - **N-3:** si la fecha actual de la reserva la puso el administrador, el turista puede
+      cancelarla aunque falten 48 horas o menos.
+
+    **Cambio nuevo pendiente de aprobación (N-8):** la consulta del turista también muestra la
+    reserva que canceló el administrador (por CU-13 o por pago rechazado), con
+    `status` = `Cancelada`. La que canceló el propio turista sigue respondiendo 404.
+
+    **Auditoría (SAD 4):** cada acción del administrador sobre una reserva o un pago queda en
+    el historial `acciones_admin` (con su motivo, si lo tiene) dentro de la misma transacción,
+    y en el log estructurado.
 
     **Formato de errores (SAD 4):** todas las respuestas de error usan el esquema `Error`.
     Los mensajes van en español; `code` es fijo y en inglés para que el frontend lo compare.
@@ -53,6 +75,13 @@ tags:
       (ADR-06).
   - name: Admin - Destinos
     description: Gestión de destinos del administrador (RF-07). Exigen `bearerAuth`.
+  - name: Admin - Reservas
+    description: |
+      Listar, aprobar, cancelar, eliminar y reagendar reservas (RF-08, CU-11 a CU-14, N-2a).
+      Exigen `bearerAuth`. Cada acción bloquea la fila de la reserva: con un doble clic, la
+      segunda petición espera a la primera y recibe 409.
+  - name: Admin - Pagos
+    description: Cambio del estado del pago simulado (RF-09, CU-15, N-1). Exige `bearerAuth`.
 
 paths:
   /health:
@@ -368,11 +397,17 @@ paths:
     post:
       tags: [Reservas]
       operationId: lookupReservation
-      summary: Consulta una reserva activa con su código y su correo (CU-04).
+      summary: Consulta una reserva con su código y su correo (CU-04).
       description: |
-        Devuelve la reserva con la **misma forma** que al crearla. "Activa" = `Pendiente` o
-        `Aprobada` y no borrada por el administrador: una cancelada responde 404, igual que un
-        código inexistente o un correo que no coincide (no da pistas sobre cuál dato falló).
+        Devuelve la reserva con la **misma forma** que al crearla. Encuentra la reserva
+        **activa** (`Pendiente` o `Aprobada`) y, además (**N-8**, pendiente de aprobación), la
+        **cancelada por el administrador** (CU-13 o pago rechazado, N-1), con `status` =
+        `Cancelada`, para que el turista sepa qué pasó. El motivo del administrador no se
+        muestra.
+
+        Responden el mismo 404 (no da pistas sobre cuál dato falló): un código inexistente, un
+        correo que no coincide, una reserva cancelada **por el propio turista** y una reserva
+        eliminada por el administrador.
 
         - Es `POST` y no `GET`: el código va en el body (N-4, ver la descripción general).
         - Límite: 10 intentos **fallidos** cada 15 minutos por IP, compartido con el cambio de
@@ -387,7 +422,7 @@ paths:
               $ref: '#/components/schemas/LookupRequest'
       responses:
         '200':
-          description: Reserva encontrada.
+          description: Reserva encontrada (activa, o cancelada por el administrador).
           content:
             application/json:
               schema:
@@ -481,9 +516,13 @@ paths:
         cancela dos veces), exige que falten **más de 48 horas** para la fecha del viaje
         (RN-02) y cambia el estado a `Cancelada`. Los cupos quedan libres de inmediato.
 
+        - **Excepción N-3:** si la fecha actual de la reserva la puso el administrador
+          (`PATCH /admin/reservas/{id}/fecha`), se puede cancelar aunque falten 48 horas o
+          menos. Si después el turista la movió a otra fecha suya, RN-02 vuelve a aplicar.
+
         - El pago no cambia (sigue `Aprobado`): los reembolsos están fuera del alcance (V7).
         - Una reserva de un destino desactivado sí se puede cancelar.
-        - Después de cancelarla, la consulta responde 404.
+        - Después de cancelarla, la consulta responde 404 (la canceló el turista).
         - Es `POST /reservas/cancelar` con el código en el body (N-4); mismo límite de intentos
           que la consulta.
       security: []
@@ -507,7 +546,9 @@ paths:
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
-          description: Faltan 48 horas o menos para la fecha del viaje (RN-02, CU-06 2a).
+          description: |
+            Faltan 48 horas o menos para la fecha del viaje (RN-02, CU-06 2a), y la fecha no la
+            puso el administrador (N-3).
           content:
             application/json:
               schema:
@@ -656,6 +697,340 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /admin/reservas:
+    get:
+      tags: [Admin - Reservas]
+      operationId: listReservations
+      summary: Lista las reservas pendientes, aprobadas y canceladas (CU-11).
+      description: |
+        No incluye las eliminadas. Orden: la fecha de viaje más lejana primero; en empate, la
+        última creada. Sin reservas → `[]` (CU-11 4a). Sin filtros ni paginación por ahora.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Lista de reservas (puede ser vacía).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AdminReservation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/reservas/{id}:
+    delete:
+      tags: [Admin - Reservas]
+      operationId: deleteReservation
+      summary: Elimina (borrado lógico) una reserva cancelada (CU-14).
+      description: |
+        Solo reservas `Cancelada`. La fila se conserva con su pago y su historial, pero deja de
+        aparecer en el listado y en la consulta del turista. El body es opcional.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminActionRequest'
+      responses:
+        '204':
+          description: Reserva eliminada (sin contenido).
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminReservationNotFound'
+        '409':
+          description: La reserva no está cancelada (CU-14 2a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: Solo se pueden eliminar reservas canceladas
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/reservas/{id}/aprobar:
+    post:
+      tags: [Admin - Reservas]
+      operationId: approveReservation
+      summary: Aprueba una reserva pendiente con el pago aprobado (CU-12).
+      description: |
+        Solo desde `Pendiente` y con el pago más reciente `Aprobado`. El body es opcional.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminActionRequest'
+      responses:
+        '200':
+          description: Reserva aprobada (`status` = `Aprobada`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminReservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminReservationNotFound'
+        '409':
+          description: La reserva ya no está pendiente (CU-12 2a) o su pago no está aprobado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                yaProcesada:
+                  summary: Ya aprobada o cancelada
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: La reserva ya fue procesada
+                pagoNoAprobado:
+                  summary: Pago pendiente o rechazado
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: El pago de la reserva no está aprobado
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/reservas/{id}/cancelar:
+    post:
+      tags: [Admin - Reservas]
+      operationId: adminCancelReservation
+      summary: Cancela una reserva pendiente o aprobada (CU-13).
+      description: |
+        Respeta RN-02: con 48 horas o menos para el viaje responde 422 (el profesor no aprobó
+        que el administrador cancele sin la ventana). El pago no cambia y los cupos quedan
+        libres. El body es opcional. Después, el turista la ve como `Cancelada` en la
+        consulta (N-8).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminActionRequest'
+      responses:
+        '200':
+          description: Reserva cancelada (`status` = `Cancelada`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminReservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminReservationNotFound'
+        '409':
+          description: La reserva ya está cancelada (CU-13 2a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: CONFLICT
+                  message: La reserva ya está cancelada
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: Faltan 48 horas o menos para la fecha del viaje (RN-02).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: BUSINESS_RULE
+                  message: La reserva no se puede cancelar porque faltan 48 horas o menos para la fecha del viaje
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/reservas/{id}/fecha:
+    patch:
+      tags: [Admin - Reservas]
+      operationId: adminRescheduleReservation
+      summary: Reagenda una reserva por causa mayor, sin la ventana de 48 horas (N-2a).
+      description: |
+        Motivo **obligatorio**. No aplica RN-02, pero sí exige una fecha posterior a hoy y
+        valida el cupo de la fecha nueva con el destino bloqueado (RN-01). El monto no cambia
+        y el contador de reagendas suma 1. Una reserva pendiente o aprobada conserva su
+        estado. Después, el turista puede cancelarla sin RN-02 (N-3).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ReservationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminRescheduleRequest'
+      responses:
+        '200':
+          description: Fecha cambiada. Devuelve la reserva con la fecha nueva.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminReservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminReservationNotFound'
+        '409':
+          description: Reserva cancelada, destino desactivado o sin cupo en la fecha nueva (RN-01).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                cancelada:
+                  summary: Reserva cancelada
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: No se puede cambiar la fecha de una reserva cancelada
+                destinoInactivo:
+                  summary: Destino desactivado
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: El destino ya no está disponible para cambiar la fecha
+                sinCupo:
+                  summary: Sin cupo en la fecha nueva
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: 'No hay cupo suficiente para esa fecha. Cupos disponibles: 1'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /admin/pagos/{id}:
+    patch:
+      tags: [Admin - Pagos]
+      operationId: changePaymentStatus
+      summary: Cambia el estado del pago simulado (CU-15).
+      description: |
+        Solo el pago **más reciente** de la reserva (`payment.id` de la reserva del
+        administrador). Estados: `Pendiente`, `Aprobado` o `Rechazado`.
+
+        - **N-1:** `Rechazado` exige motivo y **cancela la reserva** en la misma transacción
+          (libera el cupo), aunque falten 48 horas o menos o esté aprobada. No se deshace.
+        - No se puede cambiar el pago de una reserva cancelada, poner el mismo estado ni
+          dejar `Pendiente` el pago de una reserva aprobada.
+        - Devuelve la **reserva** completa (no solo el pago).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentStatusRequest'
+      responses:
+        '200':
+          description: Estado cambiado. Devuelve la reserva con el pago nuevo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminReservation'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: El pago no existe o su reserva fue eliminada (CU-15 2a).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: El pago no existe
+        '409':
+          description: El cambio no está permitido en el estado actual.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                noEsElUltimo:
+                  summary: No es el pago más reciente
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: Solo se puede cambiar el pago más reciente de la reserva
+                reservaCancelada:
+                  summary: Reserva cancelada
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: No se puede cambiar el pago de una reserva cancelada
+                mismoEstado:
+                  summary: El mismo estado que ya tiene
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: El pago ya tiene ese estado
+                pendienteConAprobada:
+                  summary: Dejar pendiente el pago de una reserva aprobada
+                  value:
+                    error:
+                      code: CONFLICT
+                      message: No se puede dejar pendiente el pago de una reserva aprobada
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   parameters:
     DestinationId:
@@ -666,6 +1041,24 @@ components:
       schema:
         type: integer
         minimum: 1
+    ReservationId:
+      name: id
+      in: path
+      required: true
+      description: Id interno de la reserva (el `id` del listado). Un id inválido responde 404.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 2147483647
+    PaymentId:
+      name: id
+      in: path
+      required: true
+      description: Id del pago (`payment.id` de la reserva del administrador). Un id inválido responde 404.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 2147483647
 
   securitySchemes:
     bearerAuth:
@@ -969,7 +1362,7 @@ components:
       type: object
       description: |
         Una reserva completa. Es la misma respuesta al crear, consultar, cambiar la fecha y
-        cancelar. No incluye el id interno ni el número de tarjeta.
+        cancelar. No incluye el id interno, el id del pago ni el número de tarjeta.
       required: [code, status, destination, travelDate, customerName, customerEmail, quote, payment, createdAt]
       properties:
         code:
@@ -979,7 +1372,9 @@ components:
         status:
           type: string
           enum: [Pendiente, Aprobada, Cancelada]
-          description: Nace `Pendiente`; `Aprobada` la pone el administrador (RF-08).
+          description: |
+            Nace `Pendiente`; `Aprobada` la pone el administrador (RF-08). `Cancelada` solo
+            se ve al cancelar, o en la consulta si la canceló el administrador (N-8).
         destination:
           type: object
           required: [id, name, place]
@@ -1067,6 +1462,132 @@ components:
         accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYWRtaW4ifQ.firma
         tokenType: Bearer
         expiresIn: 900
+
+    AdminReservation:
+      type: object
+      description: |
+        Una reserva como la ve el administrador: la misma forma del turista (`Reservation`)
+        más el id interno, el id del pago más reciente y el contador de reagendas.
+      required: [id, code, status, destination, travelDate, customerName, customerEmail, quote, payment, createdAt, reschedules]
+      properties:
+        id:
+          type: integer
+          description: Id interno; se usa en `/admin/reservas/{id}`.
+        code:
+          type: string
+          pattern: '^VY-[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$'
+        status:
+          type: string
+          enum: [Pendiente, Aprobada, Cancelada]
+        destination:
+          type: object
+          required: [id, name, place]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            place:
+              type: string
+        travelDate:
+          type: string
+          format: date
+        customerName:
+          type: string
+        customerEmail:
+          type: string
+        quote:
+          $ref: '#/components/schemas/Quote'
+        payment:
+          type: object
+          required: [id, status, cardLastDigit]
+          properties:
+            id:
+              type: integer
+              description: Id del pago más reciente; se usa en `PATCH /admin/pagos/{id}`.
+            status:
+              type: string
+              enum: [Pendiente, Aprobado, Rechazado]
+            cardLastDigit:
+              type: integer
+              minimum: 0
+              maximum: 9
+        createdAt:
+          type: string
+          format: date-time
+        reschedules:
+          type: integer
+          minimum: 0
+          description: Veces que se cambió la fecha (turista y administrador).
+      example:
+        id: 1
+        code: VY-F57NXNW9
+        status: Pendiente
+        destination:
+          id: 4
+          name: Tortuguero
+          place: Tortuguero, Limón
+        travelDate: '2026-12-10'
+        customerName: Ana Mora
+        customerEmail: ana@correo.com
+        quote:
+          basePrice: '47500.00'
+          people: 2
+          subtotal: '95000.00'
+          iva: '12350.00'
+          total: '107350.00'
+        payment:
+          id: 1
+          status: Aprobado
+          cardLastDigit: 2
+        createdAt: '2026-11-06T14:12:31.123Z'
+        reschedules: 2
+
+    AdminActionRequest:
+      type: object
+      description: Body opcional de aprobar, cancelar y eliminar. Sin body vale igual que `{}`.
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Motivo para el historial (se le quitan los espacios de los lados).
+      example:
+        reason: Pedido del cliente por teléfono
+
+    AdminRescheduleRequest:
+      type: object
+      required: [travelDate, reason]
+      properties:
+        travelDate:
+          type: string
+          format: date
+          description: Fecha nueva, posterior a hoy en Costa Rica y distinta de la actual.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Motivo obligatorio (causa mayor, N-2a).
+      example:
+        travelDate: '2026-12-15'
+        reason: Derrumbe en la ruta
+
+    PaymentStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [Pendiente, Aprobado, Rechazado]
+          description: Exactamente como aparece (con mayúscula inicial).
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Obligatorio con `Rechazado` (N-1); opcional en los demás.
+      example:
+        status: Rechazado
+        reason: La transferencia no llegó
 
     Error:
       type: object
@@ -1163,6 +1684,7 @@ components:
       description: |
         No hay una reserva activa con ese código y ese correo (CU-04 5a). El mismo mensaje si
         el código no existe, si el correo no coincide, si está cancelada o si fue borrada.
+        (En la consulta, una cancelada por el administrador sí se muestra: N-8.)
       content:
         application/json:
           schema:
@@ -1171,6 +1693,16 @@ components:
             error:
               code: NOT_FOUND
               message: No se encontró una reserva activa que coincida con los datos
+    AdminReservationNotFound:
+      description: La reserva no existe, fue eliminada o el id no es válido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: NOT_FOUND
+              message: La reserva no existe
     PayloadTooLarge:
       description: El body supera los 10 KB.
       content:
