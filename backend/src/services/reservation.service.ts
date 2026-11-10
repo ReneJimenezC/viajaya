@@ -73,6 +73,8 @@ export interface ReservationStores {
     'insertIfNewCode' | 'insertPayment' | 'findActiveByCodeAndEmail' | 'findActiveForUpdate' | 'updateTravelDate'    // NUEVO (6.F): cancelReservation para la cancelación
     | 'cancelReservation'    // NUEVO (8.G, N-3)
     | 'wasRescheduledByAdminTo'
+        // NUEVO (8.H, N-8): la consulta también encuentra la reserva cancelada por el admin
+    | 'findForLookup'
   >;
 }
 
@@ -237,7 +239,8 @@ export class ReservationService {
   // (y las mismas piezas falsas en las pruebas) que el resto del servicio.
   async lookup(input: LookupReservationInput): Promise<ReservationResult> {
     const details = await this.runInTransaction(({ reservations }) =>
-      reservations.findActiveByCodeAndEmail(input.code, input.customerEmail),
+            // CAMBIO (8.H, N-8): también la cancelada por el admin (CU-13 o pago rechazado)
+      reservations.findForLookup(input.code, input.customerEmail),
     );
     if (!details) {
       throw new AppError(404, 'NOT_FOUND', LOOKUP_NOT_FOUND_MESSAGE);

@@ -65,6 +65,8 @@ interface Recorder {
 // - stored: NUEVO (6.D) reservas activas que la consulta falsa "encuentra" (por código + correo).
 //   En 6.E se copian (para que una prueba no cambie las de otra) y su id es su posición + 1.
 // - adminDates: NUEVO (8.G, N-3) por id de reserva, la fecha que dejó la última reagenda del admin
+// - adminCancelledIds: NUEVO (8.H, N-8) ids de las reservas que canceló el ADMIN (CU-13 o pago
+//   rechazado), es decir, las que tienen 'cancelar' o 'pago_rechazado' en el historial
 function buildService(
   options: {
     reservedInTortuguero?: number;
@@ -72,9 +74,10 @@ function buildService(
     codes?: string[];
     stored?: ReservationDetails[];
     adminDates?: Record<number, string>;
+    adminCancelledIds?: number[];
   } = {},
 ) {
-  const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [], adminDates = {} } = options;
+  const { reservedInTortuguero = 18, takenCodes = [], codes, stored = [], adminDates = {}, adminCancelledIds = [] } = options;
   const recorder: Recorder = {
     transactions: 0, lockedIds: [], insertedReservations: [], insertedPayments: [], charges: 0, lookups: [], updatedDates: [], cancelledIds: [],
   };
@@ -110,6 +113,15 @@ function buildService(
         findActiveByCodeAndEmail: async (code: string, email: string) => {
           recorder.lookups.push({ code, email });
           return findRow(code, email) ?? null;
+        },
+        // NUEVO (8.H, N-8): como la base real, la consulta encuentra la activa y TAMBIÉN la
+        // cancelada por el admin; la cancelada por el turista no (V48)
+        findForLookup: async (code: string, email: string) => {
+          recorder.lookups.push({ code, email });
+          const row = rows.find((r) => r.code === code && r.customerEmail === email);
+          if (!row) return null;
+          const cancelledByAdmin = adminCancelledIds.includes(rows.indexOf(row) + 1);
+          return row.status !== 'Cancelada' || cancelledByAdmin ? row : null;
         },
         // NUEVO (6.E): la reserva "bloqueada" (id, destino y fecha actual)
         findActiveForUpdate: async (code: string, email: string) => {
@@ -373,6 +385,46 @@ describe('ReservationService.lookup (CU-04)', () => {
     assert.equal(recorder.charges, 0);
     assert.deepEqual(recorder.lockedIds, []);
     assert.equal(recorder.insertedReservations.length + recorder.insertedPayments.length, 0);
+  });
+
+  // NUEVO (8.H, N-8): la consulta muestra la reserva cancelada SOLO si la canceló el admin
+  test('cancelada por el admin (CU-13) → 200 con status Cancelada y el pago Aprobado (N-8, V49)', async () => {
+    const cancelled = { ...STORED, status: 'Cancelada' as const };
+    const { service } = buildService({ stored: [cancelled], adminCancelledIds: [1] });
+    const found = await service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' });
+    assert.equal(found.status, 'Cancelada');
+    assert.deepEqual(found.payment, { status: 'Aprobado', cardLastDigit: 2 });
+  });
+
+  test('cancelada por pago rechazado (N-1) → 200 con status Cancelada y el pago Rechazado (N-8, V49)', async () => {
+    const rejected = { ...STORED, status: 'Cancelada' as const, payment: { status: 'Rechazado' as const, cardLastDigit: 2 } };
+    const { service } = buildService({ stored: [rejected], adminCancelledIds: [1] });
+    const found = await service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' });
+    assert.equal(found.status, 'Cancelada');
+    assert.equal(found.payment.status, 'Rechazado');
+  });
+
+  test('cancelada por el propio turista → el mismo 404 de siempre (N-8)', async () => {
+    const { service } = buildService({ stored: [STORED] });
+    await service.cancel({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' }, NOW);
+    const error = await rejectsWith(service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' }), 404);
+    assert.equal(error.message, 'No se encontró una reserva activa que coincida con los datos');
+  });
+
+  test('cancelada por el admin con el correo equivocado → 404 (sigue pidiendo código Y correo)', async () => {
+    const cancelled = { ...STORED, status: 'Cancelada' as const };
+    const { service } = buildService({ stored: [cancelled], adminCancelledIds: [1] });
+    await rejectsWith(service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'otra@correo.com' }), 404);
+  });
+
+  test('cancelada por el admin: se VE, pero no se puede cambiar de fecha ni cancelar → 404 (CU-05, CU-06)', async () => {
+    const cancelled = { ...STORED, status: 'Cancelada' as const };
+    const { service, recorder } = buildService({ stored: [cancelled], adminCancelledIds: [1] });
+    await service.lookup({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' });
+    await rejectsWith(service.reschedule({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com', travelDate: '2026-11-25' }, NOW), 404);
+    await rejectsWith(service.cancel({ code: 'VY-7K3M9QXT', customerEmail: 'ana@correo.com' }, NOW), 404);
+    assert.deepEqual(recorder.updatedDates, []);
+    assert.deepEqual(recorder.cancelledIds, []);
   });
 });
 

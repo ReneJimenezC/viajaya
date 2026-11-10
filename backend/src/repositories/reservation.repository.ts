@@ -3,6 +3,7 @@
 // guardan en la MISMA transacción que bloqueó el destino (SAD 3.2).
 
 import type { EntityManager } from 'typeorm';
+import type { AdminActionType } from '../models/admin-action.entity';
 import { Payment, type PaymentStatus } from '../models/payment.entity';
 import type { ReservationStatus } from '../models/reservation.entity';
 
@@ -11,6 +12,10 @@ import type { ReservationStatus } from '../models/reservation.entity';
 // La usan la consulta, el cambio de fecha (6.E) y la cancelación (6.F).
 const ACTIVE_STATES: ReservationStatus[] = ['Pendiente', 'Aprobada'];
 
+
+// NUEVO (8.H, N-8): acciones del historial con las que el ADMIN cancela una reserva: CU-13 y el
+// pago rechazado (N-1). Si una reserva cancelada tiene alguna, la consulta del turista la muestra.
+const ADMIN_CANCEL_ACTIONS: AdminActionType[] = ['cancelar', 'pago_rechazado'];
 // Datos de una reserva nueva (todo ya validado y calculado por el servicio)
 export interface NewReservation {
   code: string;
@@ -220,6 +225,31 @@ export class ReservationRepository {
           AND r.estado = ANY($3)
           AND r.eliminado_en IS NULL`,
       [code, email, ACTIVE_STATES],
+    );
+    const row = rows[0];
+    return row ? toDetails(row) : null;
+  }
+
+    // NUEVO (8.H, N-8 y V48): búsqueda SOLO de la consulta del turista (POST /reservas/consulta).
+  // Encuentra la reserva activa (igual que findActiveByCodeAndEmail) y TAMBIÉN la cancelada por
+  // el admin: por CU-13 (acción 'cancelar') o por pago rechazado (N-1, acción 'pago_rechazado').
+  // Una cancelada sin esas filas en el historial la canceló el turista → null (404, como antes).
+  // Basta con que exista la fila: una reserva se cancela una sola vez (V33 y CU-13 2a).
+  // El cambio de fecha y la cancelación del turista NO la usan: siguen buscando solo activas.
+  // Ejemplo: Luis, cancelada por el admin → { status: 'Cancelada', ... }; Ana, cancelada por ella → null
+  async findForLookup(code: string, email: string): Promise<ReservationDetails | null> {
+    const rows: ReservationDetailsRow[] = await this.manager.query(
+      `${DETAILS_SELECT}
+        WHERE r.codigo = $1
+          AND r.email_cliente = $2
+          AND r.eliminado_en IS NULL
+          AND (r.estado = ANY($3)
+               OR (r.estado = 'Cancelada'
+                   AND EXISTS (SELECT 1
+                                 FROM acciones_admin a
+                                WHERE a.id_reserva = r.id_reserva
+                                  AND a.accion = ANY($4))))`,
+      [code, email, ACTIVE_STATES, ADMIN_CANCEL_ACTIONS],
     );
     const row = rows[0];
     return row ? toDetails(row) : null;
