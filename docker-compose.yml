@@ -43,6 +43,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       # NUEVO (Paso 3): secreto para firmar los access tokens del admin
       JWT_SECRET: ${JWT_SECRET:?Falta JWT_SECRET en .env}
+            # NUEVO (Paso 10): origen del frontend permitido por CORS (SAD 6)
+      CORS_ORIGIN: ${CORS_ORIGIN:?Falta CORS_ORIGIN en .env}
+      # NUEVO (Paso 10): proxies delante de la API; en tu PC no hay ninguno (0)
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
     ports:
       # La API también se publica solo en tu máquina
       - "127.0.0.1:${PORT}:${PORT}"

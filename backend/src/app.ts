@@ -32,7 +32,8 @@ import { AdminActionRepository } from './repositories/admin-action.repository';
 import { AdminReservationService } from './services/admin-reservation.service';
 import { AdminReservationController } from './controllers/admin-reservation.controller';
 import { createAdminReservationRouter } from './routes/admin-reservation.routes';
-
+// NUEVO (Paso 10): CORS restringido al frontend (SAD 6)
+import { corsPolicy } from './middlewares/cors';
 
 // Tamaño máximo del body: sobra para un login o una reserva (menos de 1 KB)
 const BODY_LIMIT = '10kb';
@@ -43,10 +44,17 @@ export function createApp(): express.Express {
 
   // Quita la cabecera "X-Powered-By: Express" (no revelar la tecnología usada)
   app.disable('x-powered-by');
+    // NUEVO (Paso 10): cuántos proxies delante de la API (0 en tu PC, 1 en Render, V55).
+  // Con esto req.ip es la IP real del cliente y los límites de intentos funcionan bien.
+  app.set('trust proxy', env.trustProxyHops);
 
   
   // 1) Primero el log: así se anotan TODAS las peticiones, incluso las que fallan después
   app.use(httpLogger);
+
+    // NUEVO (Paso 10): CORS después del log (así el preflight OPTIONS también queda anotado)
+  // y antes de las rutas, para que responda al preflight sin llegar a ellas
+  app.use(corsPolicy(env.corsOrigin));
   // 2) Lee el body JSON (si el Content-Type es application/json) y lo deja en req.body
   app.use(express.json({ limit: BODY_LIMIT }));
 
