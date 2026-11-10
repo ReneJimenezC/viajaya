@@ -34,7 +34,8 @@ import { AdminReservationController } from './controllers/admin-reservation.cont
 import { createAdminReservationRouter } from './routes/admin-reservation.routes';
 // NUEVO (Paso 10): CORS restringido al frontend (SAD 6)
 import { corsPolicy } from './middlewares/cors';
-
+// NUEVO (Paso 10): cabeceras de seguridad con helmet (decisión 2 = A, V56)
+import { securityHeaders } from './middlewares/security-headers';
 // Tamaño máximo del body: sobra para un login o una reserva (menos de 1 KB)
 const BODY_LIMIT = '10kb';
 
@@ -55,6 +56,9 @@ export function createApp(): express.Express {
     // NUEVO (Paso 10): CORS después del log (así el preflight OPTIONS también queda anotado)
   // y antes de las rutas, para que responda al preflight sin llegar a ellas
   app.use(corsPolicy(env.corsOrigin));
+
+    // NUEVO (Paso 10): cabeceras de seguridad en TODAS las respuestas, incluidos los errores
+  app.use(securityHeaders());
   // 2) Lee el body JSON (si el Content-Type es application/json) y lo deja en req.body
   app.use(express.json({ limit: BODY_LIMIT }));
 
