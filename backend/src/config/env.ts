@@ -86,7 +86,47 @@ function readJwtSecret(): string {
 }
 
 
+// NUEVO (Paso 10): origen del frontend permitido por CORS (SAD 6, V52).
+// Debe ser solo protocolo + dominio + puerto, sin ruta ni barra final, porque el navegador
+// envía exactamente eso en la cabecera Origin. Ej.: "http://localhost:5173".
+function readCorsOrigin(): string {
+  const raw = required('CORS_ORIGIN');
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`CORS_ORIGIN inválido: "${raw}" no tiene formato de URL`);
+  }
+  // url.origin arma "protocolo://dominio:puerto"; si no es igual al texto, sobra algo
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== raw) {
+    throw new Error(
+      `CORS_ORIGIN inválido: "${raw}". Use solo protocolo, dominio y puerto, sin barra final (ej. http://localhost:5173)`,
+    );
+  }
+  // En producción el frontend se sirve por HTTPS (SAD 6): un http:// sería un error de configuración
+  if (readNodeEnv() === 'production' && url.protocol !== 'https:') {
+    throw new Error('CORS_ORIGIN inválido: en producción debe empezar con https://');
+  }
+  return raw;
+}
 
+// NUEVO (Paso 10): cuántos proxies hay delante de la API (V55). En tu PC 0; en Render 1.
+// Express usa este número para tomar la IP real del cliente de X-Forwarded-For; sin él,
+// en Render todos parecerían la misma IP y los límites de intentos bloquearían a todos.
+// Es opcional: si no está, vale 0 (no se confía en ningún proxy, la opción segura).
+const TRUST_PROXY_MAX_HOPS = 5;
+
+function readTrustProxyHops(): number {
+  const raw = process.env.TRUST_PROXY_HOPS?.trim();
+  if (!raw) {
+    return 0;
+  }
+  const hops = Number(raw);
+  if (!/^\d+$/.test(raw) || hops > TRUST_PROXY_MAX_HOPS) {
+    throw new Error(`TRUST_PROXY_HOPS inválido: "${raw}". Use un entero de 0 a ${TRUST_PROXY_MAX_HOPS}`);
+  }
+  return hops;
+}
 
 // Objeto de configuración congelado: nadie puede modificarlo en tiempo de ejecución.
 // DATABASE_URL se agregará aquí en el módulo de conexión a la base de datos.
@@ -96,4 +136,7 @@ export const env = Object.freeze({
   databaseUrl: readDatabaseUrl(),
     // NUEVO (Paso 3)
   jwtSecret: readJwtSecret(),
+    // NUEVO (Paso 10)
+  corsOrigin: readCorsOrigin(),
+  trustProxyHops: readTrustProxyHops(),
 });

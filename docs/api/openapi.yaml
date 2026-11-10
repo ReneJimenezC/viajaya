@@ -55,6 +55,19 @@ info:
     (esquema `bearerAuth`). Sin token o con un token inválido o vencido → 401;
     con un rol distinto de `admin` → 403.
 
+    **Seguridad transversal (SAD 6):**
+    - **CORS restringido al dominio del frontend:** solo el origen configurado en
+      `CORS_ORIGIN` (en desarrollo `http://localhost:5173`) puede leer las respuestas desde
+      el navegador, con credenciales (la cookie del refresh token). Métodos permitidos:
+      `GET`, `POST`, `PATCH`, `DELETE`; cabeceras: `Content-Type` y `Authorization`.
+      Las peticiones sin cabecera `Origin` (herramientas como REST Client o curl) no cambian.
+    - **Cabeceras de seguridad** en todas las respuestas, también en los errores:
+      `Content-Security-Policy: default-src 'none';frame-ancestors 'none'`,
+      `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+      `Referrer-Policy: no-referrer` y `Strict-Transport-Security`.
+    - Detrás de un proxy (Render), la IP real del cliente se toma de `X-Forwarded-For`
+      según `TRUST_PROXY_HOPS`; así funcionan los límites de intentos (429).
+
 servers:
   - url: http://127.0.0.1:3000
     description: Desarrollo local (Docker o npm run dev)
