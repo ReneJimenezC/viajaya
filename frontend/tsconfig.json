@@ -1,0 +1,33 @@
+{
+  // Configuración de TypeScript del frontend (el navegador ejecuta lo que genera Vite)
+  "compilerOptions": {
+    // JavaScript moderno: Chrome y Edge actuales lo entienden (RNF-05)
+    "target": "ES2022",
+    // Funciones del lenguaje + las del navegador (document, window, fetch)
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // Módulos ES; Vite resuelve los imports como lo hace un bundler
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // JSX con el runtime automático de React (no hace falta "import React")
+    "jsx": "react-jsx",
+    // TypeScript solo revisa tipos; Vite es quien genera el JavaScript
+    "noEmit": true,
+    // Cada archivo se compila solo (lo exige Vite)
+    "isolatedModules": true,
+    // "import type" obligatorio para tipos: así no quedan imports vacíos en el JavaScript
+    "verbatimModuleSyntax": true,
+    // Las mismas comprobaciones estrictas que el backend
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    // Tipos de import.meta.env (Vite) y de los matchers de las pruebas
+    "types": ["vite/client", "@testing-library/jest-dom/vitest"]
+  },
+  // Archivos que se revisan: el código, las pruebas y la configuración de Vite
+  "include": ["src", "vite.config.ts"]
+}
