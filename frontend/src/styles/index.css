@@ -1,0 +1,93 @@
+/* Estilos globales: Tailwind + los tokens de diseño de ViajaYa (colores y letras).
+   Con Tailwind 4, cada token de @theme crea sus clases: --color-bosque → bg-bosque, text-bosque... */
+
+@import 'tailwindcss';
+/* Letras empaquetadas con la app (no se piden a Google: nada sale a terceros) */
+@import '@fontsource-variable/bricolage-grotesque';
+@import '@fontsource-variable/lexend';
+
+@theme {
+  /* Paleta (rediseño del 10/11, estética propuesta por el equipo: azul marino + verde azulado).
+     Contraste calculado con la fórmula de WCAG 2.1 (AA pide 4.5:1 para texto y 3:1 para bordes
+     de controles, RNF-03); todos los pares de texto usados dan 5.1:1 o más.
+     Los nombres se conservan para no tocar cada pantalla: "bosque" es ahora el verde azulado del mar */
+  --color-basalto: #132a3e; /* texto principal (13.2:1 sobre neblina) */
+  --color-basalto-suave: #475b6b; /* texto secundario y borde de los campos (6.3:1 sobre neblina) */
+  --color-neblina: #eef3f6; /* fondo general */
+  --color-papel: #ffffff; /* superficies (tarjetas, formularios, tablas) */
+  --color-bosque: #0f6e78; /* acción principal (6.0:1 con texto blanco) */
+  --color-bosque-oscuro: #0b5760; /* acción principal al pasar el mouse (8.3:1) */
+  --color-marino: #153a5b; /* encabezado, portada y pie (11.7:1 con texto blanco) */
+  --color-marino-oscuro: #0f2b45; /* parte baja del pie y degradados */
+  --color-celeste: #5cc6cf; /* acento: botón del encabezado y detalles (5.8:1 con texto marino) */
+  --color-celeste-claro: #ddf2f4; /* fondo suave del acento y texto claro sobre marino (10.1:1) */
+  --color-musgo: #cfdce3; /* bordes decorativos y separadores (no de campos) */
+  --color-exito: #22663f;
+  --color-exito-claro: #e1f1e7;
+  --color-aviso: #8a5300;
+  --color-aviso-claro: #fbefd9;
+  --color-error: #a4271d;
+  --color-error-claro: #fbe4e1;
+
+  /* Letras: títulos con carácter y texto pensado para la legibilidad */
+  --font-display: 'Bricolage Grotesque Variable', system-ui, sans-serif;
+  --font-sans: 'Lexend Variable', system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    background-color: var(--color-neblina);
+    color: var(--color-basalto);
+    font-family: var(--font-sans);
+    /* 17 px: un poco más grande que el valor por defecto, para usuarios de nivel técnico básico (SAD 6) */
+    font-size: 106.25%;
+    line-height: 1.55;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+
+  /* Foco visible en TODO lo que se maneja con teclado (WCAG 2.4.7). Anillo de dos colores:
+     borde oscuro + halo blanco, así se ve igual sobre fondos claros y sobre el azul marino */
+  :focus-visible {
+    outline: 3px solid var(--color-basalto);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 5px var(--color-papel);
+  }
+
+  /* Quien pide menos movimiento en su sistema no recibe animaciones (WCAG 2.3.3) */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Al imprimir la confirmación, solo sale el boleto (lo marcado con .print-only-area) */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-only-area,
+  .print-only-area * {
+    visibility: visible;
+  }
+  .print-only-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
