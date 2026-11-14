@@ -73,6 +73,119 @@
   }
 }
 
+/* Animación de los dibujos de las tarjetas de destino (DestinationArt, decisión del 11/11).
+   Solo se mueven mientras el mouse está sobre la tarjeta (.dest-card) o el foco está dentro de
+   ella: nada se mueve solo y sin parar (WCAG 2.2.2). transform-box hace que cada pieza gire o se
+   mueva respecto de sí misma y no del dibujo completo. */
+.dest-card [class^='art-'],
+.dest-card [class*=' art-'] {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.dest-card:hover .art-drift,
+.dest-card:focus-within .art-drift {
+  animation: art-drift 3s linear infinite;
+}
+.dest-card:hover .art-drift.art-wide,
+.dest-card:focus-within .art-drift.art-wide {
+  animation-name: art-drift-wide;
+}
+.dest-card:hover .art-slow,
+.dest-card:focus-within .art-slow {
+  animation-duration: 4.5s;
+}
+.dest-card:hover .art-rise,
+.dest-card:focus-within .art-rise {
+  animation: art-rise 3s ease-in-out infinite alternate;
+}
+.dest-card:hover .art-smoke,
+.dest-card:focus-within .art-smoke {
+  animation: art-smoke 2.4s ease-out infinite;
+}
+.dest-card:hover .art-late,
+.dest-card:focus-within .art-late {
+  animation-delay: 1.2s;
+}
+.dest-card .art-sway {
+  transform-origin: 50% 100%;
+}
+.dest-card:hover .art-sway,
+.dest-card:focus-within .art-sway {
+  animation: art-sway 2.2s ease-in-out infinite alternate;
+}
+.dest-card:hover .art-twinkle,
+.dest-card:focus-within .art-twinkle {
+  animation: art-twinkle 1.6s ease-in-out infinite alternate;
+}
+.dest-card:hover .art-bob,
+.dest-card:focus-within .art-bob {
+  animation: art-bob 2s ease-in-out infinite alternate;
+}
+.dest-card:hover .art-cloud,
+.dest-card:focus-within .art-cloud {
+  animation: art-cloud 6s ease-in-out infinite alternate;
+}
+
+@keyframes art-drift {
+  to {
+    transform: translateX(-40px);
+  }
+}
+@keyframes art-drift-wide {
+  to {
+    transform: translateX(-60px);
+  }
+}
+@keyframes art-rise {
+  to {
+    transform: translateY(-6px);
+  }
+}
+@keyframes art-smoke {
+  from {
+    transform: translateY(0) scale(0.8);
+    opacity: 0.9;
+  }
+  to {
+    transform: translateY(-18px) scale(1.4);
+    opacity: 0;
+  }
+}
+@keyframes art-sway {
+  from {
+    transform: rotate(-3deg);
+  }
+  to {
+    transform: rotate(3deg);
+  }
+}
+@keyframes art-twinkle {
+  to {
+    opacity: 0.3;
+  }
+}
+@keyframes art-bob {
+  from {
+    transform: translateY(0) rotate(-2deg);
+  }
+  to {
+    transform: translateY(-4px) rotate(2deg);
+  }
+}
+@keyframes art-cloud {
+  to {
+    transform: translateX(-60px);
+  }
+}
+
+/* Con "reducir movimiento" en el sistema, los dibujos no se animan nunca (WCAG 2.3.3) */
+@media (prefers-reduced-motion: reduce) {
+  .dest-card [class^='art-'],
+  .dest-card [class*=' art-'] {
+    animation: none !important;
+  }
+}
+
 /* Al imprimir la confirmación, solo sale el boleto (lo marcado con .print-only-area) */
 @media print {
   body * {
