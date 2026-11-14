@@ -120,18 +120,24 @@ export function SearchPage() {
           aria-label="Buscar excursión"
           className="grid gap-4 rounded-2xl bg-papel p-5 shadow-lg shadow-marino/15 sm:grid-cols-2 sm:p-6 lg:grid-cols-[2fr_1.4fr_1fr_auto] lg:items-start"
         >
+          {/* Pedido del tester (13/11): "Lugar" solo no decía qué escribir. La API busca el texto
+              dentro del lugar del destino ("La Fortuna, Alajuela"), así que sirve un pueblo,
+              una zona o una provincia. La ayuda va visible (no solo como placeholder, que se borra
+              al escribir) y los lectores de pantalla la leen con el campo (WCAG 3.3.2).
+              Los 3 campos llevan una ayuda de una línea para que queden alineados. */}
           <TextField
-            label="Lugar"
+            label="Lugar o provincia"
             optional
+            hint="Pueblo, zona o provincia. Ej.: Puntarenas"
             name="lugar"
             value={lugar}
             onChange={(event) => setLugar(event.target.value)}
-            placeholder="Ejemplo: Puntarenas"
             maxLength={150}
             error={fieldErrors.lugar}
           />
           <TextField
             label="Fecha del viaje"
+            hint="A partir de mañana"
             name="fecha"
             type="date"
             min={firstTravelDate()}
@@ -142,6 +148,7 @@ export function SearchPage() {
           />
           <TextField
             label="Personas"
+            hint="Cuántas viajan"
             name="personas"
             type="number"
             inputMode="numeric"
@@ -153,7 +160,7 @@ export function SearchPage() {
             error={fieldErrors.personas}
             required
           />
-          <Button type="submit" className="sm:mt-7">
+          <Button type="submit" className="sm:mt-12">
             Ver cupos
           </Button>
         </form>
@@ -219,7 +226,7 @@ function DestinationCard({ destination, search }: { destination: PublicDestinati
       : null;
 
   return (
-    <li className="flex flex-col overflow-hidden rounded-2xl border border-musgo bg-papel shadow-sm">
+    <li className="dest-card flex flex-col overflow-hidden rounded-2xl border border-musgo bg-papel shadow-sm">
       <div className="relative h-36">
         <DestinationArt kind={artKindFor(destination)} />
         {/* Etiqueta sobre el dibujo con los lugares libres (el detalle también va abajo en texto) */}
