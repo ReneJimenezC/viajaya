@@ -11,6 +11,20 @@ const UNIQUE_NAME_INDEX = 'uq_destinos_nombre';
 const UNIQUE_VIOLATION = '23505';
 // Estados de reserva que ocupan cupo (sección 7: pendiente y aprobada; cancelada no)
 const OCCUPYING_STATES = ['Pendiente', 'Aprobada'];
+// Búsqueda por lugar sin tildes (decisión 2 del 13/11): cada letra de ACCENTED se cambia por la
+// de la misma posición en PLAIN (función translate de Postgres). Mayúsculas y minúsculas van las
+// dos, así no depende del idioma configurado en la base (Docker o Supabase).
+export const ACCENTED = 'ÁÀÂÄÉÈÊËÍÌÎÏÓÒÔÖÚÙÛÜÑáàâäéèêëíìîïóòôöúùûüñ';
+export const PLAIN = 'AAAAEEEEIIIIOOOOUUUUNaaaaeeeeiiiioooouuuun';
+
+// Patrón de búsqueda por lugar: sin tildes ni ñ, con los comodines % y _ escapados (y la \),
+// y rodeado de % ("contiene"). Ejemplos: "Limón" → "%Limon%"; "Peña" → "%Pena%"; "50%" → "%50\%%"
+export function placeSearchPattern(place: string): string {
+  // NFD separa la letra de su tilde ("ó" → "o" + tilde); el rango \u0300-\u036f son las tildes sueltas
+  const plain = place.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const escaped = plain.replace(/[\\%_]/g, (char) => `\\${char}`);
+  return `%${escaped}%`;
+}
 
 // Datos de un destino nuevo (ya validados por zod)
 export interface NewDestination {
@@ -74,16 +88,21 @@ export class DestinationRepository {
     }
   }
   // Destinos ACTIVOS, opcionalmente filtrados por lugar (contiene el texto, sin distinguir
-  // mayúsculas). Ejemplo: "punta" encuentra "Quepos, Puntarenas". Ordenados por nombre.
+  // mayúsculas ni tildes). Ejemplos: "punta" encuentra "Quepos, Puntarenas"; "Limon" encuentra
+  // "Tortuguero, Limón". Ordenados por nombre.
   findActive(place?: string): Promise<Destination[]> {
     const query = this.manager
       .createQueryBuilder(Destination, 'd')
       .where('d.activo = true')
       .orderBy('d.nombre', 'ASC');
     if (place) {
-      // % y _ son comodines en ILIKE: se escapan para que se busquen como texto normal
-      const escaped = place.replace(/[\\%_]/g, (char) => `\\${char}`);
-      query.andWhere('d.lugar ILIKE :pattern', { pattern: `%${escaped}%` });
+      // Se quitan las tildes en los dos lados: en la columna con translate y en el texto buscado
+      // con placeSearchPattern. ILIKE sigue ignorando mayúsculas.
+      query.andWhere('translate(d.lugar, :accented, :plain) ILIKE :pattern', {
+        accented: ACCENTED,
+        plain: PLAIN,
+        pattern: placeSearchPattern(place),
+      });
     }
     return query.getMany();
   }
